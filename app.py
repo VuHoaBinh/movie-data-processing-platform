@@ -36,9 +36,20 @@ elif page == 'Analyst':
     st.subheader('Analyst dashboard')
     a,b,c,d=st.columns(4); a.metric('Users',len(users)); b.metric('Movies',len(movies)); c.metric('Views',f'{len(watches):,}'); d.metric('Average rating',f'{ratings.rating.mean():.2f} / 5')
     genre=joined.groupby('genre',as_index=False).watch_id.count().rename(columns={'watch_id':'views'}).sort_values('views',ascending=False)
-    a,b=st.columns(2); a.plotly_chart(px.bar(genre,x='genre',y='views',title='Genre popularity'),use_container_width=True); b.plotly_chart(px.scatter(perf,x='views',y='avg_rating',color='genre',hover_name='title',title='Movie performance'),use_container_width=True)
+    a,b=st.columns(2)
+    a.plotly_chart(px.bar(genre,x='genre',y='views',color='genre',title='Genre popularity',template='plotly_white'),use_container_width=True)
+    # A linear axis hides long-tail movies when blockbusters have thousands of views.
+    performance=perf[perf.views >= perf.views.quantile(.70)]
+    chart=px.scatter(performance,x='views',y='avg_rating',color='genre',hover_name='title',hover_data=['completion_rate','watch_hours'],log_x=True,opacity=.65,title='Movie performance — top 30% by views (log scale)',template='plotly_white')
+    chart.update_layout(xaxis_title='Views (log scale)',yaxis_title='Average rating',legend_title='Genre')
+    b.plotly_chart(chart,use_container_width=True)
     engagement=joined.groupby('user_id',as_index=False).watch_id.count().rename(columns={'watch_id':'views'})
-    st.plotly_chart(px.histogram(engagement,x='views',nbins=20,title='User engagement distribution'),use_container_width=True)
+    a,b=st.columns(2)
+    a.plotly_chart(px.histogram(engagement,x='views',nbins=30,title='User engagement distribution'),use_container_width=True)
+    by_plan=joined.groupby('subscription_plan',as_index=False).watch_id.count().rename(columns={'watch_id':'views'})
+    b.plotly_chart(px.pie(by_plan,names='subscription_plan',values='views',title='Views by subscription plan'),use_container_width=True)
+    hourly=joined.assign(hour=joined.watch_timestamp.dt.hour).groupby('hour',as_index=False).watch_id.count().rename(columns={'watch_id':'views'})
+    st.plotly_chart(px.bar(hourly,x='hour',y='views',title='Viewing hours: evening peak'),use_container_width=True)
 else:
     st.subheader('Manager dashboard')
     st.write('Low-engagement movies'); st.dataframe(perf.nsmallest(10,'views')[['title','genre','views','completion_rate']],hide_index=True,use_container_width=True)
