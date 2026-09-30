@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+.venv/
+data/processed/
+data/processed_spark/
+.streamlit/
