@@ -227,7 +227,8 @@ def main() -> None:
     check(rows, "BR9", "Manager", "segments agree with the generator's activity_profile (confusion matrix, quantile vs former fixed 10/35)",
           f"{agreement:.2%} agreement vs {fixed_agreement:.2%} with fixed thresholds; "
           "matrix (profile -> Inactive/Casual/Active users): " + "; ".join(
-              f"{profile} -> " + "/".join(f"{int(n):,}" for n in rows_["users"]) for profile, rows_ in matrix.groupby("activity_profile", sort=False)),
+              f"{profile} -> " + "/".join(f"{int(matrix[(matrix['activity_profile'] == profile) & (matrix['segment'] == segment)]['users'].iloc[0]):,}" for segment in rules.SEGMENTS)
+              for profile in rules.SEGMENTS),
           matrix["users"].sum() == len(expected["user_engagement"]) and len(matrix) == 9 and agreement > fixed_agreement, ms)
     sensitivity = []
     for low_percent, high_percent in ((25, 75), (33, 67), (20, 80), (20, 65)):
