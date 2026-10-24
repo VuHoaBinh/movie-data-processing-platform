@@ -54,8 +54,8 @@ Bộ sinh còn có một tuỳ chọn `--dirty-rate` chèn có chủ đích bả
 |---|---|---|
 | Hive/Parquet `raw.*` | Bản sao Parquet của 4 CSV, schema tường minh, timestamp còn là chuỗi | 28,8 MB |
 | Hive/Parquet `curated.*` | Đã làm sạch bằng 7 luật, timestamp UTC; `curated.watch_events` phân vùng theo `watch_date`; thêm `curated.quality_report` | 29,7 MB |
-| Hive/Parquet `analytics.*` | 10 bảng tổng hợp phục vụ dashboard | 1,4 MB |
-| Cassandra `movie_analytics` | 13 bảng phục vụ theo mô hình query-first (cộng 2 bảng `live_trending`, `live_trending_spark` cho stream) | 37,0 MB (13 bảng batch, RF=1) |
+| Hive/Parquet `analytics.*` | 12 bảng tổng hợp phục vụ dashboard (10 bảng gốc, `user_recommendations`, `user_recommendations_als`) | 6,2 MB |
+| Cassandra `movie_analytics` | 18 bảng do batch ghi theo mô hình query-first (15 bảng của dashboard gồm hai bảng gợi ý, `quality_report`, và hai bảng siêu dữ liệu `batch_table_rows`, `batch_runs`), cộng 2 bảng `live_trending`, `live_trending_spark` cho stream | 31,4 MB cho cả keyspace, không tính snapshot (RF=1; hai bảng gợi ý chiếm 11,4 và 12,8 MB) |
 
 Luồng: `CSV → raw → curated → analytics → Cassandra` (`src/spark_batch_job.py`, hàm `run`). Cassandra là bản phục vụ có thể dựng lại bất cứ lúc nào.
 
@@ -82,7 +82,7 @@ Sự toàn vẹn khoá ngoại và tính duy nhất khoá chính được kiểm
 mọi `orphans` bằng 0. Khoá ngoại không được cơ sở dữ liệu ép buộc (CSV không có ràng buộc); luật `orphan_user` và `orphan_movie`
 trong `src/data_quality.py` thay vai trò đó khi làm sạch.
 
-Lược đồ phục vụ trong Cassandra (13 bảng batch + 2 bảng stream) nằm trong `sql/cassandra_schema.cql`; ánh xạ BR → bảng ở `docs/storage_decision.md` và mục 4 của `docs/business_requirements.md`.
+Lược đồ phục vụ trong Cassandra (18 bảng do batch ghi, gồm hai bảng gợi ý, `quality_report` và 2 bảng siêu dữ liệu, cộng 2 bảng stream) nằm trong `sql/cassandra_schema.cql`; ánh xạ BR → bảng ở `docs/storage_decision.md` và mục 4 của `docs/business_requirements.md`.
 
 ## 3. Đặc điểm Big Data
 
@@ -92,10 +92,10 @@ Lược đồ phục vụ trong Cassandra (13 bảng batch + 2 bảng stream) n�
 |---|---|---|
 | Số dòng | users 50.000; movies 20.000; ratings 500.000; watch_history 1.000.000 | `data_profile.md` |
 | CSV thô | 74,3 MB (watch_history 49,28 MB; ratings 21,46 MB) | `storage_footprint.md`, `data_profile.md` |
-| Parquet raw / curated / analytics | 28,8 / 29,7 / 1,4 MB | `storage_footprint.md` |
-| Cassandra (13 bảng, RF=1, nén LZ4) | 37,0 MB | `storage_footprint.md` |
+| Parquet raw / curated / analytics | 28,8 / 29,7 / 6,2 MB | `storage_footprint.md` |
+| Cassandra (cả keyspace, không tính snapshot, RF=1, nén LZ4) | 31,4 MB | `storage_footprint.md` |
 | Khoảng thời gian | 180 ngày (2026-04-01 đến 2026-09-27) | `data_profile.md` |
-| Thời gian batch đầy đủ (1M dòng xem) | 249,6 s | `load_times.md` |
+| Thời gian batch đầy đủ (1M dòng xem) | 337,3 s | `load_times.md` |
 | Pandas / Spark ở 1M và 5M dòng xem | 15,3 s / 58,5 s và 31,5 s / 104,7 s; RAM đỉnh 592 / 3.602 MB và 2.192 / 4.393 MB | `batch_engines.md` |
 
 **Ước lượng tăng trưởng (tính từ, giả định nêu rõ).** Giả định: số lượt xem mỗi người dùng mỗi ngày không đổi; kích thước file tuyến tính theo số dòng; không tính users/movies (nhỏ, tăng chậm).
@@ -114,7 +114,7 @@ RAM của nó bị chặn bởi heap 4 GB. Khả năng mở rộng ở các kị
 
 | Đường xử lý | Nhịp / tốc độ | Nguồn |
 |---|---|---|
-| Batch | Chạy khi khởi động stack, bấm "Refresh batch (Spark)" hoặc khi gửi form; **không có lịch tự động trong mã**. Một lượt đầy đủ 249,6 s với 1M dòng xem | `load_times.md`, `app.py`, `compose.yaml` |
+| Batch | Chạy khi khởi động stack, bấm "Refresh batch (Spark)" hoặc khi gửi form; **không có lịch tự động trong mã**. Một lượt đầy đủ 337,3 s với 1M dòng xem (`load_times.md`; 5-10 phút trên máy đang bận, `batch_runs`) | `load_times.md`, `app.py`, `compose.yaml` |
 | Stream, cửa sổ sản xuất | Cửa sổ tumbling 5 phút tính trên timestamp bản ghi Kafka (`TREND_WINDOW_MINUTES` mặc định 5), dashboard làm mới panel mỗi 10 s | `flink/flink_trending_sql_job.py`, `app.py` |
 | Stream, tốc độ demo | 500 sự kiện/s; trong một cửa sổ 5 phút là 150.000 sự kiện (tính từ 500 × 300 s) | `src/kafka_event_producer.py` |
 | Stream, đã đo cao nhất | Producer đạt 5.979 sự kiện/s (cấu hình 8.000); Flink SQL và Spark Streaming đều xử lý đúng mọi cửa sổ ở tốc độ này | `stream_latency.md` |
@@ -132,7 +132,7 @@ trung bình khoảng 0,064 sự kiện/s (tính từ 1.000.000 / (180 × 86.400)
 | CSV | 4 nguồn batch | Dạng bảng, có header, timestamp là chuỗi (mọi giá trị trong `data/` đều parse được; xem 4.3) |
 | JSON | `watch-events`, `trending-results` | Bán cấu trúc, mỗi sự kiện một thông điệp; Flink đọc bằng `format = json` và bỏ qua thông điệp lỗi (`json.ignore-parse-errors`) |
 | Parquet trên Hive | `raw.*`, `curated.*`, `analytics.*` | Dạng cột, nén, schema trong metastore; `curated.watch_events` phân vùng theo ngày |
-| Cassandra wide rows | 13 bảng phục vụ + 2 bảng live | Một partition chứa nhiều dòng sắp xếp sẵn theo clustering key (ví dụ `live_trending`: partition là ngày, sắp theo `window_start DESC, rank`) |
+| Cassandra wide rows | 18 bảng do batch ghi + 2 bảng live | Một partition chứa nhiều dòng sắp xếp sẵn theo clustering key (ví dụ `live_trending`: partition là ngày, sắp theo `window_start DESC, rank`) |
 
 ### 3.4 Veracity (độ tin cậy)
 
@@ -209,7 +209,7 @@ Danh mục phân bố đều giữa 8 thể loại (từ 2.496 đến 2.505 phim
 ### 4.4 Cold start (người dùng chưa có lịch sử)
 
 * 168 user (0,34%) không có lượt xem nào; 1.413 user chưa đánh giá phim nào; 21 phim chưa được đánh giá.
-* Hệ quả đo được ở màn hình BR3: 99,66% user nhận gợi ý cá nhân hoá, phần còn lại thuộc nhóm cold start và được hiển thị phim phổ biến (`br_effectiveness.md`).
+* Hệ quả ở BR3 (tính từ bảng `user_recommendations` bằng Pandas và đối chiếu với Cassandra ở `br_effectiveness.md`): 49.832 user (99,66%) có danh sách theo thể loại yêu thích; 168 user cold start nhận 10 phim xem nhiều nhất (1.680 dòng `popular`); ALS chỉ phục vụ 49.832 user có lịch sử.
 
 ## 5. Hệ quả cho thiết kế kỹ thuật dữ liệu
 
@@ -218,14 +218,14 @@ Mỗi dòng nêu phát hiện, quyết định thiết kế bị nó chi phối 
 | # | Phát hiện (nguồn) | Quyết định thiết kế | Vị trí trong mã / tài liệu |
 |---|---|---|---|
 | 1 | Lượt xem lệch: 1% phim chiếm 33,24%, Action chiếm 28,61% (`data_profile.md`) | Tính trước top-N và đặt trong bảng đã sắp xếp sẵn (`views DESC`) để đọc bằng `LIMIT`, không quét lúc đọc; khoá phân vùng theo `genre` hoặc `bucket` thay vì theo `movie_id` để một truy vấn chỉ chạm một partition | `sql/cassandra_schema.cql` (`movie_performance`, `top_viewed_movies`, `movies_by_genre_rating`) |
-| 2 | Phân vùng theo thể loại chia đều theo số phim (2.496-2.505 dòng mỗi partition) nhưng tải đọc lệch về Action (28,61% lượt xem) (`data_profile.md`) | Chấp nhận nguy cơ nóng một partition ở quy mô này vì partition nhỏ (2.505 dòng, `LIMIT 8` ở BR3) và dashboard cache truy vấn 60 s; ở quy mô lớn cần tách bucket theo thể loại/tháng (đã nêu trong ADR) | `app.py` (`cql`, `ttl=60`), `docs/storage_decision.md` mục 5 |
+| 2 | Phân vùng theo thể loại chia đều theo số phim (2.496-2.505 dòng mỗi partition) nhưng tải đọc lệch về Action (28,61% lượt xem) (`data_profile.md`) | Chấp nhận nguy cơ nóng một partition ở quy mô này vì partition nhỏ (2.505 dòng; BR3 giờ đọc bảng `user_recommendations`, còn `movies_by_genre_rating` phục vụ bộ lọc thể loại của BR4) và dashboard cache truy vấn 60 s; ở quy mô lớn cần tách bucket theo thể loại/tháng (đã nêu trong ADR) | `app.py` (`cql`, `ttl=60`), `docs/storage_decision.md` mục 5 |
 | 3 | Partition `bucket='all'` chứa ≈ 20.000 dòng (bằng số phim, `data_profile.md`) | Tin vào việc dữ liệu hiện nhỏ; đây là điểm sẽ phải đổi khi danh mục lớn lên (chia bucket hoặc chỉ giữ top-K) | `docs/storage_decision.md` mục 5 |
 | 4 | Dữ liệu trải 180 ngày liên tục, mỗi ngày ≈ 5,5 nghìn sự kiện (`data_profile.md`) | `curated.watch_events` phân vùng theo `watch_date` để truy vấn theo khoảng ngày chỉ đọc các partition cần; truy vấn ad hoc một tuần chạy 485 ms ở p50 (`storage_latency.md`) | `src/spark_batch_job.py` (`run`, `partition_by="watch_date"`), `src/dashboard_queries.py` (`ADHOC_SQL`) |
 | 5 | Sự kiện stream có timestamp riêng; giờ cao điểm 17-21 giờ chiếm ≈ 56,1% (`data_profile.md`) | Cửa sổ tumbling 5 phút gắn với timestamp bản ghi Kafka do producer đặt lúc gửi (thực chất gần với ingestion time) và watermark độ trễ 0 s, nên dữ liệu đến muộn chưa được xử lý; event time thật từ `source_timestamp` với độ lệch thứ tự có giới hạn là cải tiến dự kiến (task #19); bảng `live_trending` phân vùng theo ngày, sắp `window_start DESC` để `LIMIT 10` trả cửa sổ mới nhất | `flink/flink_trending_sql_job.py`, `sql/cassandra_schema.cql` (`live_trending`) |
 | 6 | Nguồn có thể trộn định dạng thời gian (naive và ISO có offset); fixture có cả hai (`tests/conftest.py`) | Giữ timestamp là chuỗi ở vùng raw và parse sang UTC khi làm sạch; session Spark đặt múi giờ UTC | `src/spark_batch_job.py` (`RAW_SCHEMAS`, `curate`, `create_spark`), `src/batch_processing.py` (`parse_timestamps`) |
 | 7 | Ít đánh giá mỗi phim: trung vị 13, nhỏ nhất 1 (`data_profile.md`) | Xếp hạng bằng điểm trung bình có trọng số kiểu Bayesian (kéo về trung bình toàn cục, trọng số trước m = trung vị số đánh giá) để phim có 1-2 đánh giá không đứng đầu; kết quả đo: phim top-10 có ít nhất 169 đánh giá (`br_effectiveness.md`) | `src/spark_batch_job.py` (`build_tables`, biến `min_votes`), `src/batch_processing.py` |
 | 8 | 21 phim chưa có đánh giá (`data_profile.md`) | `weighted_rating` là null và loại khỏi các bảng xếp hạng đánh giá (`top_rated_movies`, `movies_by_genre_rating`) nhưng vẫn nằm trong `movie_performance` | `src/spark_batch_job.py` (`serving_frames`, biến `rated`) |
-| 9 | 168 user (0,34%) chưa có lượt xem (`data_profile.md`) | Giữ mọi user ở `user_engagement` bằng phép join trái và đưa vào phân khúc Inactive; BR3 chuyển sang phim phổ biến cho user không có sở thích (cold start) | `src/spark_batch_job.py` (`build_tables`), `app.py` (nhánh `else` ở BR3) |
+| 9 | 168 user (0,34%) chưa có lượt xem (`data_profile.md`) | Giữ mọi user ở `user_engagement` bằng phép join trái và đưa vào phân khúc Inactive; `user_recommendations` bù cho user không có sở thích (cold start) bằng 10 phim xem nhiều nhất (cột `source = 'popular'`), còn ALS không có dòng nào cho họ và dashboard chuyển về danh sách theo thể loại | `src/spark_batch_job.py` (`build_tables`), `src/recommendations.py` (`recommend_spark`), `app.py` (`viewer_page`) |
 | 10 | Phân phối lượt xem mỗi user kéo dài: p50 12, p90 45; 42,18% user ≤ 10 lượt (`data_profile.md`) | Phân khúc theo ngưỡng cố định 10 và 35 lượt xem; hai ngưỡng này không rút ra từ dữ liệu mà là quy ước, và nên được đặt lại bằng phân vị khi dữ liệu thật có phân phối khác | `src/spark_batch_job.py` (`build_tables`, cột `segment`), `src/batch_processing.py` |
 | 11 | Dữ liệu thật thường bẩn còn dữ liệu sinh ra sạch (0 dòng bị loại, `data_quality_real.txt`) | Tách bước `curated` có luật chất lượng đếm từng loại lỗi và lưu vào `curated.quality_report`; chứng minh luật bằng dữ liệu bẩn có chủ đích | `src/data_quality.py`, `generate_data.py` (`inject_dirty_rows`) |
 | 12 | Truy vấn theo khoá cần 1-2 ms trên Cassandra nhưng 240-650 ms trên Spark SQL; quét 50.000 dòng thì hoà (382 ms so với 383 ms) (`storage_latency.md`) | Dùng hai lớp: Cassandra phục vụ truy vấn theo khoá/top-N, Hive/Parquet cho lưu trữ lịch sử, tính lại và truy vấn ad hoc | `docs/storage_decision.md` |

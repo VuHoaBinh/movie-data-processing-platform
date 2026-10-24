@@ -13,7 +13,7 @@ Phần 7 liệt kê những gì **không** đo được hoặc chỉ là nhận 
 | C2 | Độ trễ truy vấn (query latency) | Thời gian một truy vấn dashboard trả đủ dòng | ms, p50/p95 | `benchmarks/storage_latency.py`: 200 lần (Cassandra), 20 lần (Spark SQL) sau warm-up |
 | C3 | Độ trễ kết quả stream (result latency) | Từ lúc kết thúc cửa sổ 10 s đến khi top-10 đúng của cửa sổ đó xuất hiện trong Cassandra | s, p50/p95 | `benchmarks/stream_latency.py`, mọi đồng hồ là của host |
 | C4 | Thông lượng (throughput) | Khối lượng xử lý trên đơn vị thời gian | sự kiện/s, truy vấn/s, hàng/s | burst 100k sự kiện; 250-8000 sự kiện/s; 8 luồng đọc Cassandra |
-| C5 | Thời gian chạy batch | Từ CSV thô đến 10 bảng dashboard | s | `benchmarks/batch_engines.py` (3 lần ≤1M, 1 lần 5M), `load_times.py` |
+| C5 | Thời gian chạy batch | Từ CSV thô đến các bảng dashboard (10 bảng ở `batch_engines`, 12 bảng analytics ở `load_times`) | s | `benchmarks/batch_engines.py` (3 lần ≤1M, 1 lần 5M), `load_times.py` |
 | C6 | Khả năng mở rộng (scalability) | Thời gian và RAM tăng thế nào khi dữ liệu tăng 50 lần (100k→5M) | hệ số tăng, MB | cùng benchmark C5, RSS cả cây tiến trình lấy mẫu mỗi 0,5 s từ `/proc` |
 | C7 | Dung lượng lưu trữ | Kích thước trên đĩa của cùng dữ liệu | MB | `benchmarks/storage_footprint.py` |
 | C8 | Chịu lỗi (fault tolerance) | Cơ chế khôi phục khi tiến trình/node chết | định tính | **Không đo thực nghiệm** (xem phần 7); đánh giá theo cơ chế: replication, checkpoint, lưu offset |
@@ -21,6 +21,8 @@ Phần 7 liệt kê những gì **không** đo được hoặc chỉ là nhận 
 | C10 | Chi phí | Chi phí tài nguyên/giấy phép để chạy | định tính | License (tất cả Apache-2.0) + RAM đo được ở C6/docker stats |
 | C11 | Hệ sinh thái / connector | Có connector chính thức, tài liệu, cộng đồng | định tính 1-5 | Connector thực tế đã dùng (spark-cassandra-connector, cassandra-driver, flink-sql-connector-kafka) |
 | C12 | Phù hợp mô hình truy cập | Truy vấn dashboard có ánh xạ tự nhiên không | định tính 1-5 | Ánh xạ BR → bảng/truy vấn (`docs/storage_decision.md`) |
+| C13 | Chất lượng gợi ý ngoại tuyến (BR3) | Trên tập kiểm tra theo thời gian (30 ngày cuối), trong 10 phim gợi ý có bao nhiêu phim user thật sự xem sau đó | precision@10, recall@10, NDCG@10, hit rate@10 | `benchmarks/recommender_eval.py` → `recommender_eval.md` |
+| C14 | Độ phủ và tỉ lệ phục vụ của gợi ý | Số phim khác nhau được gợi ý trên tổng danh mục; tỉ lệ user nhận đủ 10 phim từ chính phương pháp đó | % danh mục, % user | cùng benchmark |
 
 Thang điểm 1-5 ở phần 6: 5 = tốt nhất trong các lựa chọn so sánh cho tiêu chí đó. Điểm dựa trên số đo khi tiêu chí
 có số đo (ghi rõ), còn lại là nhận định của nhóm.
@@ -31,11 +33,12 @@ Chạy: `python -m pytest` (host, cần Java) và `docker compose --profile tool
 
 | Kiểm thử | Nội dung | Kết quả |
 |---|---|---|
-| `test_fixture_tables.py` | Bộ dữ liệu 4 user / 4 movie / 50 lượt xem (có timestamp ISO có offset, đủ 3 segment, phim chưa ai xem); giá trị từng ô của 10 bảng suy ra bằng tay, chạy trên cả Pandas và Spark | đạt |
-| `test_parity.py` | Pandas và Spark cho **10 bảng giống hệt** và cùng số dòng bị loại trên fixture, dữ liệu sạch, dữ liệu bẩn và dữ liệu thưa; cờ `--csv-output-dir` tương thích | đạt |
+| `test_fixture_tables.py` | Bộ dữ liệu 4 user / 4 movie / 50 lượt xem (có timestamp ISO có offset, đủ 3 segment, phim chưa ai xem); giá trị từng ô của 11 bảng (10 bảng gốc và `user_recommendations`) suy ra bằng tay, chạy trên cả Pandas và Spark | đạt |
+| `test_parity.py` | Pandas và Spark cho **11 bảng giống hệt** và cùng số dòng bị loại trên fixture, dữ liệu sạch, dữ liệu bẩn và dữ liệu thưa; cờ `--csv-output-dir` tương thích. Bảng ALS chỉ có ở Spark nên nằm ngoài so sánh này | đạt |
+| `test_recommendations.py` | BR3: bộ dữ liệu thứ hai (4 user, 8 phim) suy tay danh sách gợi ý của cả hai engine, gồm hoà điểm, phim bù theo độ phổ biến và user cold start; không có phim đã xem nào trong danh sách trên dữ liệu sạch, bẩn và thưa (cả Pandas lẫn Spark); mọi user có đủ 10 phim; ALS: đủ 10 hạng, không có phim đã xem, **hai lần chạy cùng seed cho kết quả giống hệt**, đổi seed thì kết quả đổi | đạt |
 | `test_data_quality.py` | 7 luật (trùng id, timestamp không parse được, null, giá trị sai, timestamp tương lai, mồ côi user/movie — các dòng mồ côi sẽ bị mất âm thầm ở phép join nếu không đếm) với thứ tự ưu tiên; `--dirty-rate` chèn dòng bẩn thì số dòng bị loại **bằng đúng** số đã chèn | đạt |
-| `test_cassandra_counts.py` | Số dòng 13 bảng Cassandra = số dòng tính độc lập bằng Pandas từ CSV; `summary_metrics` khớp; rank 1..10 của `live_trending*` | đạt |
-| `test_storage_equivalence.py` | 12 truy vấn dashboard cho kết quả giống hệt giữa Cassandra và Hive/Parquet | đạt |
+| `test_cassandra_counts.py` | Số dòng 14 bảng Cassandra = số dòng tính độc lập bằng Pandas từ CSV; `summary_metrics` khớp; rank 1..10 của `live_trending*`; 200 user ngẫu nhiên: không phim đã xem nào trong `user_recommendations` và `user_recommendations_als`; 50 danh sách theo thể loại bằng danh sách Pandas; `quality_report`, `batch_table_rows`, `batch_runs` khớp báo cáo Pandas và `COUNT(*)` | đạt |
+| `test_storage_equivalence.py` | 14 truy vấn dashboard (12 cũ và 2 truy vấn gợi ý) cho kết quả giống hệt giữa Cassandra và Hive/Parquet | đạt |
 | `test_rounding.py` | `round_half_up` khác làm tròn chẵn của pandas | đạt |
 
 Báo cáo dòng bị loại (`python -m src.data_quality`, Spark in ra log và lưu vào bảng Hive `curated.quality_report` mỗi lần batch; không có Hive thì dùng `--quality-report`), ví dụ
@@ -73,7 +76,7 @@ Dữ liệu sinh vào thư mục tạm, users 50k, movies 20k, ratings = watches
 * Lần đo đầu (Spark tính lại dữ liệu đã làm sạch cho từng bảng đầu ra, chưa `persist`): 65 / 89 / 135 s (`batch_engines_spark_no_cache.md`); thêm `persist` còn 55 / 58 / 105 s.
   Lần đo đầu đó ghi `outputs_identical = False` ở 100k: do bảng `user_segments` — với 100k lượt xem không ai vượt 35 lượt nên Spark chỉ trả 2 segment (thiếu "Active") còn Pandas trả 3; đã sửa bằng cách join với danh sách segment cố định, chạy lại 100k với code hiện tại cho `True`. Cột RAM của Spark trong file đó (109-138 MB) chỉ đo tiến trình Python bọc ngoài, không gồm JVM, nên **không so sánh** với `batch_engines.md`.
 
-Các giai đoạn của batch đầy đủ (1M dòng, `load_times.md`): CSV→raw Parquet 35,5 s; →curated 89,3 s; →10 bảng analytics 88,3 s; →Cassandra 36,5 s; tổng 249,6 s.
+Các giai đoạn của batch đầy đủ (1M dòng, `load_times.md`, lần đo mới sau khi thêm bảng gợi ý và ALS): CSV→raw Parquet 87,3 s; →curated 50,8 s; kế hoạch bảng analytics (các phép tính vô hướng chạy ngay) 36,8 s; ALS huấn luyện và chấm điểm 37,3 s; →12 bảng analytics 76,5 s; →Cassandra (16 bảng và siêu dữ liệu) 48,6 s; tổng 337,3 s. Lần đo trước, khi chưa có gợi ý và ALS: 35,5 / 89,3 / 88,3 / 36,5, tổng 249,6 s. Các giai đoạn dao động mạnh giữa các lần chạy trên máy này (`hive_raw` 31,6-209,9 s qua 10 lần chạy trong lúc phát triển, vì máy dùng chung với Docker, trình duyệt và các tiến trình khác). Lần chạy đầu có ALS (heap 2 GB, giai đoạn `als` lúc đó gồm cả `build_tables`) mất 153,1 s; từ khi tách giai đoạn và lưu ứng viên trung gian xuống đĩa, ALS mất 37,3-44,4 s trong bốn lần chạy.
 
 ### 3.2 Lưu trữ: Cassandra và Hive/Parquet (C2, C4, C7) — `storage_latency.md`, `storage_footprint.md`
 
@@ -97,7 +100,7 @@ Các giai đoạn của batch đầy đủ (1M dòng, `load_times.md`): CSV→ra
 * Truy vấn quét toàn bảng 50k dòng: **hòa** (382 ms so với 383 ms) — lợi thế của Cassandra chỉ ở truy vấn theo khoá/top-N đã sắp sẵn.
 * Chỉ Hive trả lời được câu hỏi ad hoc chưa có bảng tính sẵn (tuần bất kỳ, nhờ cắt tỉa partition `watch_date`).
 * Thông lượng đọc Cassandra: 1.389 truy vấn/s với 8 luồng client (70% tra user, 30% top-10); bị giới hạn bởi client Python (GIL) chứ không phải node Cassandra, nên là cận dưới.
-* Dung lượng (`storage_footprint.md`): CSV thô 74,3 MB; Parquet raw 28,8; curated 29,7; analytics 1,4; 13 bảng Cassandra 37,0 MB (dư thừa có chủ đích do mô hình query-first). Parquet nhỏ hơn CSV ~2,5 lần.
+* Dung lượng (`storage_footprint.md`): CSV thô 74,3 MB; Parquet raw 28,8; curated 29,7; analytics 6,2 (12 bảng, gồm hai bảng gợi ý); keyspace Cassandra 31,4 MB không tính snapshot (hai bảng gợi ý chiếm 11,4 và 12,8 MB; lần đo cũ 37,0 MB cho 13 bảng tính cả snapshot truncate nên không so sánh trực tiếp). Dư thừa có chủ đích do mô hình query-first. Mỗi lần batch truncate các bảng và Cassandra tự chụp snapshot của dữ liệu cũ (khoảng 11-13 MB cho mỗi bảng gợi ý mỗi lần); sau khoảng chục lần chạy khi phát triển, snapshot chiếm 274 MiB và được thu hồi bằng `nodetool clearsnapshot --all` trước khi đo. Parquet nhỏ hơn CSV ~2,5 lần.
 
 ### 3.3 Stream: Flink và Spark Structured Streaming (C3, C4) — `stream_latency.md`
 
@@ -120,33 +123,58 @@ Cách đọc:
 * Spark Structured Streaming: độ trễ ổn định ~2,7-3,1 s (chu kỳ trigger 1 s + ghi Cassandra), không tăng theo tải tới ~6k sự kiện/s; không cần Kafka trung gian và materializer.
 * Giới hạn phép đo: producer Python chỉ đạt ~6k sự kiện/s nên chưa tìm được điểm bão hòa của Flink SQL và Spark; chỉ có cận dưới.
 
+### 3.4 Gợi ý BR3: ba phương pháp (C13, C14, C5) — `recommender_eval.md`
+
+Cùng một dữ liệu, cùng cách loại phim đã xem, đánh giá ngoại tuyến bằng chia theo thời gian: huấn luyện trên sự kiện trước 2026-08-28 23:59 UTC (834.438 lượt xem, 417.330 đánh giá), kiểm tra trên 30 ngày cuối đến 2026-09-27 (165.562 lượt xem). Mỗi phương pháp chỉ thấy dữ liệu huấn luyện. Người được đánh giá là 40.865 user xem ít nhất một phim **mới** (chưa xem trước cutoff) trong giai đoạn kiểm tra, trung bình 3,8 phim mỗi user; 181 user trong đó chưa có lịch sử (cold start). Định nghĩa các chỉ số và cách tính ở phần ghi chú của `recommender_eval.md`; user không nhận được danh sách tính là 0 điểm.
+
+| Phương pháp | precision@10 | recall@10 | NDCG@10 | hit rate@10 | độ phủ danh mục | user nhận đủ 10 phim | huấn luyện (s) | chấm điểm (s) |
+|---|---|---|---|---|---|---|---|---|
+| Popularity (mốc: phim xem nhiều nhất chưa xem) | 0,0314 | 0,0815 | 0,0543 | 0,2637 | 0,13% | 100,00% | 0,0 | 0,8 |
+| Theo thể loại, xếp theo điểm Bayesian (triển khai) | 0,0147 | 0,0394 | 0,0299 | 0,1365 | 0,48% | 100,00% | 0,0 | 3,8 |
+| Theo thể loại, xếp theo lượt xem (độ nhạy, không triển khai) | 0,0279 | 0,0726 | 0,0505 | 0,2374 | 0,53% | 100,00% | 0,0 | 3,9 |
+| ALS rank 32, alpha 40 (triển khai) | 0,0262 | 0,0679 | 0,0472 | 0,2246 | 2,67% | 99,56% | 10,8 | 10,8 |
+| ALS rank 16 (độ nhạy) | 0,0292 | 0,0732 | 0,0500 | 0,2448 | 2,79% | 99,56% | 5,4 | 5,7 |
+| ALS rank 64 (độ nhạy) | 0,0218 | 0,0579 | 0,0421 | 0,1938 | 2,67% | 99,56% | 18,1 | 13,5 |
+| ALS alpha 10 (độ nhạy) | 0,0273 | 0,0694 | 0,0494 | 0,2315 | 2,67% | 99,56% | 7,1 | 7,7 |
+
+Cách đọc (mọi nhận xét dưới đây là về bộ dữ liệu sinh, nơi `generate_data.py` đặt 43% lượt xem của mỗi user vào thể loại ưa thích duy nhất của họ, 27% vào 34 phim blockbuster và 15% vào 500 phim "hit" cố định; không suy ra cho người xem thật):
+* **Popularity (mốc so sánh) mạnh hơn cả hai phương pháp cá nhân hoá.** Precision@10 0,0314 so với 0,0262 của ALS và 0,0147 của gợi ý theo thể loại. Dữ liệu sinh dồn lượt xem vào ít phim (1% phim chiếm 33,24% lượt xem, `data_profile.md`), nên "phim được xem nhiều nhất mà user chưa xem" đã bắt được phần lớn tín hiệu; nhưng nó gợi ý cho mọi người gần như cùng một danh sách (độ phủ danh mục 0,13%).
+* **ALS đạt 83% precision của popularity trong khi gợi ý cá nhân hoá** (độ phủ 2,67%, khoảng 20 lần popularity) và hơn gợi ý theo thể loại 1,8 lần về precision@10. Cái giá: huấn luyện 10,8 s và chấm điểm 10,8 s trên Spark `local[*]` (Pandas cho gợi ý theo thể loại mất 3,8 s, không cần huấn luyện), và 181 user cold start (0,44% số người được đánh giá) không có danh sách từ ALS: `users_with_full_list` = 0,9956. Dashboard xử lý bằng cách quay về danh sách theo thể loại.
+* **Gợi ý theo thể loại (xếp theo điểm Bayesian) thấp nhất về độ chính xác** (hit rate 0,1365 so với 0,2637). Nguyên nhân chủ yếu là khoá xếp hạng: khi giữ nguyên ứng viên (hai thể loại xem nhiều nhất, chưa xem) và chỉ đổi khoá xếp từ điểm Bayesian sang lượt xem huấn luyện, precision@10 tăng từ 0,0147 lên 0,0279 và hit rate từ 0,1365 lên 0,2374, gần bằng popularity. Điểm đánh giá của dữ liệu sinh phản ánh "chất lượng" phim chứ không dự báo lượt xem sắp tới, nên các phim điểm cao nhưng ít người xem đứng đầu danh sách (hạn chế của khoá xếp hạng đã triển khai, không phải của việc chọn theo thể loại).
+* **Độ nhạy của ALS** (các hàng "ALS rank 16/64", "ALS alpha 10" chỉ để xem độ nhạy, không dùng để chọn lại cấu hình đã triển khai, vì chọn theo tập kiểm tra sẽ là rò rỉ): rank 16 cho 0,0292, rank 64 cho 0,0218 precision@10; alpha 10 cho 0,0273. Cấu hình triển khai (`rank=32`, `alpha=40`) được chọn trước khi chạy đánh giá và không được chỉnh lại sau khi thấy kết quả.
+
 ## 4. Hiệu quả ứng dụng theo yêu cầu nghiệp vụ (đánh giá mục tiêu 5)
 
 `python -m benchmarks.br_effectiveness` chạy các truy vấn của từng màn hình trên Cassandra và so với tính toán Pandas độc lập từ CSV (1M lượt xem).
 
 | BR | Nhóm người dùng | Câu hỏi trả lời | Màn hình | Tiêu chí thành công | Kết quả đo | Đạt | Thời gian truy vấn (ms) |
 |---|---|---|---|---|---|---|---|
-| BR1 | Viewer | Tìm phim theo tên/thể loại | Viewer › BR1 (ô tìm kiếm + lọc thể loại) | browse-all returns every movie (8 genre partitions) | 20,000 of 20,000 movies | yes | 818.4 |
-| BR1 | Viewer | Tìm phim theo tên/thể loại | Viewer › BR1 (ô tìm kiếm + lọc thể loại) | title search 'spider' finds the Spider-Man titles | 2 titles | yes | 818.4 |
-| BR2 | Viewer | Phim nào đang thịnh hành (tổng và cửa sổ 5 phút gần nhất) | Viewer › BR2 (bảng + panel live, làm mới 10 s) | all-time top-10 equals the Pandas ranking | True | yes | 6.0 |
-| BR2 | Viewer | Phim nào đang thịnh hành (tổng và cửa sổ 5 phút gần nhất) | Viewer › BR2 (bảng + panel live, làm mới 10 s) | live window has ranks 1..10 and is < 10 min old | 10 rows, newest window 8.1 min old | yes | 9.0 |
-| BR3 | Viewer | Nên xem phim gì tiếp theo | Viewer › BR3 (chọn user) | recommendations stay in the user's top-2 genres (200 random users) | 199/199 users with history OK | yes | 14.9 |
-| BR3 | Viewer | Nên xem phim gì tiếp theo | Viewer › BR3 (chọn user) | share of users that get personalised results | 99.66% (rest are cold-start, shown popular picks) | yes | 0.0 |
-| BR4 | Analyst | Phim nào được đánh giá cao đáng tin | Analyst › BR4 | top-10 by weighted rating equals the Pandas ranking | True | yes | 15.6 |
-| BR4 | Analyst | Phim nào được đánh giá cao đáng tin | Analyst › BR4 | no top-10 title rests on very few ratings | min rating_count in top-10 = 169 | yes | 15.6 |
-| BR5 | Analyst | Thể loại nào được xem nhiều | Analyst › BR5 (biểu đồ cột) | sum of genre views = total views | 1,000,000 vs 1,000,000 | yes | 20.5 |
-| BR6 | Analyst | Mức độ tương tác của người dùng, giờ xem, gói thuê bao | Analyst › BR6 | engagement histogram covers all users; views add up | 50,000 users, 1,000,000 views | yes | 3795.5 |
-| BR7 | Analyst | Phim nào hiệu quả (lượt xem, rating, completion) | Analyst › BR7 (scatter top 30%) | top 30% of movies by views are returned, with the minimum views above the 70th percentile | 6,000 movies, min views 37 | yes | 254.5 |
-| BR8 | Manager | Phim nào ít người xem | Manager › BR8 | 10 lowest-viewed titles equal the Pandas list | views [1, 1, 2, 2, 2, 2, 2, 2, 2, 2] | yes | 10.4 |
-| BR9 | Manager | Phân khúc người dùng | Manager › BR9 | segments cover all users exactly once | 50,000 users in 3 segments | yes | 15.9 |
-| BR10 | Manager | Xu hướng theo ngày | Manager › BR10 | daily series has one point per day and adds up to total views | 180 days, 1,000,000 views | yes | 21.4 |
+| BR1 | Viewer | Tìm phim theo tên/thể loại | Viewer › BR1 (ô tìm kiếm + lọc thể loại) | browse-all returns every movie (8 genre partitions) | 20,000 of 20,000 movies | yes | 134.6 |
+| BR1 | Viewer | Tìm phim theo tên/thể loại | Viewer › BR1 (ô tìm kiếm + lọc thể loại) | title search 'spider' finds the Spider-Man titles | 2 titles | yes | 134.6 |
+| BR2 | Viewer | Phim nào đang thịnh hành (tổng và cửa sổ 5 phút gần nhất) | Viewer › BR2 (bảng + panel live, làm mới 10 s) | all-time top-10 equals the Pandas ranking | True | yes | 2.3 |
+| BR2 | Viewer | Phim nào đang thịnh hành (tổng và cửa sổ 5 phút gần nhất) | Viewer › BR2 (bảng + panel live, làm mới 10 s) | live window has ranks 1..10 and is < 10 min old | 10 rows, newest window 9.4 min old | yes | 1.8 |
+| BR3 | Viewer | Nên xem phim gì tiếp theo (không phải phim đã xem) | Viewer › Recommended for you (chọn user và bộ gợi ý) | genre-based: no watched title is recommended (200 random users) | 0 watched titles in 2,000 recommendations for 200 users with a list | yes | 2.3 |
+| BR3 | Viewer | Nên xem phim gì tiếp theo (không phải phim đã xem) | Viewer › Recommended for you (chọn user và bộ gợi ý) | genre-based: favourite-genre rows stay in the user's top-2 genres and lists equal the Pandas lists | 0 users with a foreign genre; 200/200 lists identical | yes | 2.3 |
+| BR3 | Viewer | Nên xem phim gì tiếp theo (không phải phim đã xem) | Viewer › Recommended for you (chọn user và bộ gợi ý) | ALS: no watched title is recommended (200 random users) | 0 watched titles in 1,990 recommendations for 199 users with a list | yes | 2.3 |
+| BR3 | Viewer | Nên xem phim gì tiếp theo (không phải phim đã xem) | Viewer › Recommended for you (chọn user và bộ gợi ý) | share of users that get favourite-genre recommendations (the rest are cold-start, shown popular titles) | 99.66% genre-based; every user has a list: True | yes | 0.0 |
+| BR3 | Viewer | Nên xem phim gì tiếp theo (không phải phim đã xem) | Viewer › Recommended for you (chọn user và bộ gợi ý) | ALS serves every user with watch history (cold-start users fall back to the genre-based list) | 49,832 of 49,832 users with history (99.66% of all users) | yes | 436.9 |
+| BR4 | Analyst | Phim nào được đánh giá cao đáng tin | Analyst › BR4 | top-10 by weighted rating equals the Pandas ranking | True | yes | 2.9 |
+| BR4 | Analyst | Phim nào được đánh giá cao đáng tin | Analyst › BR4 | no top-10 title rests on very few ratings | min rating_count in top-10 = 169 | yes | 2.9 |
+| BR5 | Analyst | Thể loại nào được xem nhiều, bởi bao nhiêu người | Analyst › BR5 (hai biểu đồ cột: lượt xem và người xem duy nhất) | sum of genre views = total views | 1,000,000 vs 1,000,000 | yes | 2.2 |
+| BR5 | Analyst | Thể loại nào được xem nhiều, bởi bao nhiêu người | Analyst › BR5 (hai biểu đồ cột: lượt xem và người xem duy nhất) | unique viewers per genre equal the Pandas distinct count and never exceed the user count | 8 genres, max 42,915 of 50,000 users | yes | 2.2 |
+| BR6 | Analyst | Mức độ tương tác: lượt xem, phút xem, số ngày hoạt động, giờ xem, gói thuê bao | Analyst › BR6 (thẻ chỉ số, ba biểu đồ phân phối, bộ lọc gói và vùng) | engagement scan covers all users; views add up | 50,000 users, 1,000,000 views | yes | 485.0 |
+| BR6 | Analyst | Mức độ tương tác: lượt xem, phút xem, số ngày hoạt động, giờ xem, gói thuê bao | Analyst › BR6 (thẻ chỉ số, ba biểu đồ phân phối, bộ lọc gói và vùng) | watch minutes and active days per user equal the Pandas values | 94,838,155 minutes, active days 0-58 (mean 18.3, median 12), median watch minutes 1141 | yes | 485.0 |
+| BR7 | Analyst | Phim nào hiệu quả (lượt xem, rating, completion) | Analyst › BR7 (scatter top 30%) | top 30% of movies by views are returned, with the minimum views above the 70th percentile | 6,000 movies, min views 37 | yes | 28.1 |
+| BR8 | Manager | Phim nào ít người xem | Manager › BR8 | 10 lowest-viewed titles equal the Pandas list | views [1, 1, 2, 2, 2, 2, 2, 2, 2, 2] | yes | 2.4 |
+| BR9 | Manager | Phân khúc người dùng | Manager › BR9 | segments cover all users exactly once | 50,000 users in 3 segments | yes | 1.8 |
+| BR10 | Manager | Xu hướng theo ngày | Manager › BR10 | daily series has one point per day and adds up to total views | 180 days, 1,000,000 views | yes | 2.6 |
 
-Thời gian truy vấn đo khi máy đang chạy cả stack streaming và benchmark nên dao động (BR6 quét 50k dòng: 382 ms ở phần 3.2 khi máy rảnh). Chưa đo thời gian render của Streamlit và chưa có khảo sát người dùng thật: "hiệu quả ứng dụng" ở đây là đúng + đủ + nhanh của dữ liệu phục vụ từng màn hình.
+Thời gian truy vấn đo khi máy đang chạy cả stack streaming nên dao động (BR6 quét 50k dòng sáu cột: 485,0 ms ở lần đo này, 3.795,5 ms ở lần đo trước khi máy đang bận hơn; 382 ms cho truy vấn một cột ở phần 3.2 khi máy rảnh). Với BR3 `query_ms` là thời gian trung bình mỗi user (một truy vấn một partition). Chưa đo thời gian render của Streamlit và chưa có khảo sát người dùng thật: "hiệu quả ứng dụng" ở đây là đúng + đủ + nhanh của dữ liệu phục vụ từng màn hình.
 
 ## 5. Chi phí và vận hành: số liệu thực tế
 
 * Stack demo gồm 11 dịch vụ Docker; bộ nhớ đo bằng `docker stats` khi chạy benchmark stream: Cassandra ~2,0 GiB, Flink TaskManager ~1,1 GiB, Spark Streaming ~1,1 GiB, Kafka ~1,0 GiB, JobManager ~0,8 GiB.
-* Spark batch cần ~4 phút cho 1M dòng ở dạng đầy đủ (Hive + Cassandra); form "Record a movie view" chạy lại nền nên giao diện không bị khoá.
+* Spark batch cần 337 s (~5,6 phút) cho 1M dòng ở dạng đầy đủ (Hive + Cassandra + ALS), 5-10 phút khi máy bận; driver 1,5 GB (`SPARK_DRIVER_MEMORY`) vì máy ảo Docker 8 GB đã chứa Cassandra, Kafka và Flink: với heap 2-3 GB, tiến trình Spark bị hệ điều hành kết thúc (OOM) trong lúc ghi bảng gợi ý 500.000 dòng; form "Record a movie view" chạy lại nền nên giao diện không bị khoá.
 * Lỗi vận hành gặp khi làm: `cassandra-driver` trên Python 3.12 phải dùng reactor mặc định (AsyncioConnection treo), PySpark 3.5 `toPandas()` cần `distutils` (đã bị xoá ở 3.12), Derby metastore chỉ cho một tiến trình Spark, TaskManager 2 slot không chạy được hai job Flink (nay 4 slot).
 
 ## 6. Đánh giá công nghệ theo tiêu chí
@@ -160,7 +188,7 @@ Thời gian truy vấn đo khi máy đang chạy cả stack streaming và benchm
 | C2 Độ trễ quét lớn / ad hoc | 3 | 4 | hòa ở 50k dòng; chỉ Hive làm được ad hoc |
 | C4 Thông lượng | 4 | 2 | 1.389 qps (cận dưới) so với ~4 qps tuần tự (1/0,25 s) |
 | C6 Mở rộng | 4 | 4 | suy luận (phân vùng/shard), chưa đo cụm nhiều node |
-| C7 Dung lượng | 3 | 5 | 37 MB (13 bảng, dư thừa) so với 1,4 MB analytics / 29,7 MB curated |
+| C7 Dung lượng | 3 | 5 | 31,4 MB (cả keyspace, dư thừa, không tính snapshot) so với 6,2 MB analytics / 29,7 MB curated |
 | C8 Chịu lỗi | 4 | 3 | replication + commitlog (RF=1 ở demo nên chưa có); Hive: file Parquet nhưng Derby một node |
 | C9 Vận hành | 3 | 3 | Cassandra thêm 1 dịch vụ + schema; Hive cần metastore nhúng |
 | C10 Chi phí | 3 | 5 | Cassandra ~2 GiB RAM thường trực; Parquet chỉ là file |
@@ -197,6 +225,20 @@ Kết luận: giữ Flink cho BR2 nhưng **đã chuyển job mặc định sang 
 
 Kết luận: ở quy mô đồ án Pandas đủ và nhanh hơn; Spark cần thiết khi dữ liệu vượt RAM một máy và để ghi Hive/Cassandra bằng connector.
 
+### 6.4 Ba phương pháp gợi ý BR3
+
+| Tiêu chí | Popularity (mốc) | Theo thể loại (triển khai chính) | ALS (phương án thay thế) | Bằng chứng |
+|---|---|---|---|---|
+| C13 Chất lượng gợi ý | 5 | 2 | 4 | precision/NDCG/hit rate ở `recommender_eval.md` |
+| C14 Độ phủ, cá nhân hoá | 1 | 2 | 4 | độ phủ 0,13% / 0,48% / 2,67% của danh mục |
+| C14 Phục vụ user cold start | 5 | 5 | 1 | 100% / 100% / 99,56% user nhận đủ 10 phim |
+| C5 Thời gian tính | 5 | 4 | 2 | gần 0 s / 3,8 s (Pandas) / 21,6 s (huấn luyện + chấm điểm, Spark) |
+| C9 Vận hành | 5 | 4 | 3 | ALS cần thêm `pyspark.ml`, hyperparameter, và NumPy trên worker; không có bản Pandas |
+| Giải thích được cho người xem | 3 | 5 | 2 | cột "Why": thể loại ưa thích / phổ biến / người xem tương tự |
+| C1 Đúng đắn (không gợi ý phim đã xem) | 5 | 5 | 5 | `tests/test_recommendations.py`, `br_effectiveness.md` (200 user ngẫu nhiên, 0 vi phạm) |
+
+Kết luận: không phương pháp nào thắng mọi tiêu chí. Popularity là mốc cần vượt và là phần bù cho user cold start; **ALS cá nhân hoá hơn và chính xác hơn gợi ý theo thể loại trên dữ liệu này nhưng cần lịch sử xem và tốn huấn luyện**; gợi ý theo thể loại rẻ nhất trong các phương pháp cá nhân hoá, giải thích được và luôn có kết quả. Dashboard cho người xem chọn giữa hai phương pháp cá nhân hoá; điểm 1-5 là nhận định của nhóm dựa trên các số đo ở trên.
+
 ## 7. Giới hạn và những gì chưa đo
 
 * Một máy, một node Cassandra (RF=1), một Kafka broker một partition, Flink parallelism 1: **không đo được mở rộng ngang và chịu lỗi thật** (C6 chỉ đo tăng dữ liệu trên một máy; C8 chỉ là đánh giá cơ chế). Chưa chạy thử kill node/TaskManager.
@@ -204,3 +246,5 @@ Kết luận: ở quy mô đồ án Pandas đủ và nhanh hơn; Spark cần thi
 * Các engine stream chạy đồng thời và tranh nhau CPU; các số tuyệt đối có thể khác khi chạy riêng. Các ô `flink-python` từ 1000 sự kiện/s trở lên bị ảnh hưởng bởi tồn đọng (drain tối đa 5 phút mỗi kịch bản).
 * Hive đo bằng Spark SQL trong một phiên đã warm-up, kết quả được `collect()` về driver; không phải Hive on Tez/LLAP.
 * Điểm 1-5 của các tiêu chí định tính (C8-C12) là nhận định của nhóm, không đo bằng thực nghiệm.
+* Đánh giá gợi ý (C13, C14) là ngoại tuyến, trên dữ liệu tổng hợp và một mốc cắt thời gian duy nhất; chưa có thử nghiệm A/B hay người dùng thật, nên không biết gợi ý nào làm tăng giờ xem thật. Siêu tham số ALS không được tinh chỉnh, và các số về thời gian huấn luyện lẫn thời gian chấm điểm chỉ mang tính tham khảo vì Pandas và Spark được đo trên hai engine khác nhau, trên máy đang chạy cả stack.
+* Chưa đo độ chính xác của danh sách theo từng nhóm người dùng (Inactive/Casual/Active) và chưa đo độ đa dạng thể loại trong danh sách.

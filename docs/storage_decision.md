@@ -28,7 +28,7 @@ Dùng **hai lớp lưu trữ bổ trợ nhau**:
    - `raw.*`: bản sao Parquet của CSV, schema tường minh, chưa làm sạch.
    - `curated.*`: dữ liệu đã chuẩn hoá (timestamp UTC, bỏ trùng/thiếu); `curated.watch_events`
      **phân vùng theo `watch_date`**.
-   - `analytics.*`: 10 bảng tổng hợp của dashboard (nguồn để nạp vào Cassandra).
+   - `analytics.*`: các bảng tổng hợp của dashboard (10 bảng gốc cộng `user_recommendations` và, nếu batch chạy ALS, `user_recommendations_als`); nguồn để nạp vào Cassandra.
 
 Luồng: `CSV → raw → curated → analytics → Cassandra`. Spark luôn tính lại từ lớp lake; Cassandra
 chỉ là bản "phục vụ" có thể dựng lại bất cứ lúc nào.
@@ -50,15 +50,16 @@ chỉ là bản "phục vụ" có thể dựng lại bất cứ lúc nào.
 |---|---|---|
 | BR1 Tìm kiếm / lọc | `movie_performance` PK `((genre), views DESC, movie_id)` | `WHERE genre = ?` (lọc tiêu đề ở ứng dụng) |
 | BR2 Trending | batch: `top_viewed_movies`; live: `live_trending` | `WHERE bucket='all' LIMIT 10`; `WHERE day = ? LIMIT 10` |
-| BR3 Gợi ý cá nhân | `user_preferences`, `movies_by_genre_rating` | `WHERE user_id = ?` rồi `WHERE genre = ? LIMIT 8` |
+| BR3 Gợi ý cá nhân | `user_recommendations` PK `((user_id), rank)`; phương án ALS: `user_recommendations_als` (cùng cấu trúc); `user_preferences` (hiển thị thể loại ưa thích) | `WHERE user_id = ?` (một partition, 10 dòng đã xếp hạng). `movies_by_genre_rating` vẫn dùng cho bộ lọc thể loại của BR4 |
 | BR4 Rating | `top_rated_movies` | `WHERE bucket='all' LIMIT 10` |
-| BR5 Genre | `genre_popularity` | đọc 8 dòng |
-| BR6 Engagement | `user_engagement`, `subscription_views`, `hourly_views` | scan cột `views`; đọc bảng nhỏ |
+| BR5 Genre | `genre_popularity` | đọc 8 dòng (`views`, `unique_viewers`) |
+| BR6 Engagement | `user_engagement`, `subscription_views`, `hourly_views` | một lần quét `user_engagement` lấy `views`, `watch_minutes`, `active_days` (cùng lượt đọc); đọc bảng nhỏ |
 | BR7 Performance | `top_viewed_movies` | `WHERE bucket='all' LIMIT ceil(30% × movies)` |
 | BR8 Low engagement | `low_engagement_movies` PK `((bucket), views ASC, title, movie_id)` | `LIMIT 10` |
 | BR9 Segment | `user_segments` | đọc 3 dòng |
 | BR10 Xu hướng ngày | `daily_views` PK `((bucket), day)` | `WHERE bucket='all'` |
 | Tổng quan | `summary_metrics` | `WHERE bucket='all'` |
+| Trang Data Engineering | `batch_runs` PK `((bucket), finished_at DESC)`, `batch_table_rows`, `quality_report` PK `((table_name), reason)`; `live_trending` | `WHERE bucket='all' LIMIT 5`; đọc toàn bảng nhỏ; `WHERE day = ? LIMIT 10` |
 
 Cùng một dữ liệu có thể xuất hiện ở nhiều bảng (denormalization) — đây là đánh đổi chủ động của
 mô hình query-first: ghi nhiều hơn một chút để mỗi truy vấn đọc chỉ chạm một partition.
@@ -81,6 +82,7 @@ mô hình query-first: ghi nhiều hơn một chút để mỗi truy vấn đọ
 | Làm mới batch = truncate + insert (`write_cassandra`) | Trong lúc làm mới, dashboard có thể thấy bảng rỗng hoặc dở dang trong thời gian ngắn | Chấp nhận cho demo; production dùng bảng có phiên bản (ghi bảng mới rồi đổi con trỏ/alias) hoặc hoán đổi |
 | Quét toàn bộ (BR6 histogram) kém hơn Parquet | Chậm hơn khi đọc cả bảng | Benchmark trong `docs/evaluation.md`; có thể tính histogram trước |
 | Derby nhúng chỉ cho 1 tiến trình Spark tại một thời điểm | Không chạy hai job Hive đồng thời | Production dùng Hive Metastore Service + Postgres/MySQL |
+| Mỗi lần `TRUNCATE` Cassandra chụp snapshot (`auto_snapshot`) | Mỗi lần batch để lại snapshot của dữ liệu cũ (khoảng 11-13 MB cho mỗi bảng gợi ý, 274 MiB sau khoảng chục lần chạy khi phát triển), đĩa đầy dần | `nodetool clearsnapshot --all` (đã dùng trước khi đo dung lượng); production tắt `auto_snapshot` hoặc đổi sang ghi bảng mới rồi hoán đổi |
 | Cassandra nhất quán cuối cùng (eventual) | Đọc ngay sau ghi có thể cũ | RF=1 trong demo; production RF=3 + `LOCAL_QUORUM` |
 
 ## 6. Phương án đã loại
@@ -100,3 +102,4 @@ mô hình query-first: ghi nhiều hơn một chút để mỗi truy vấn đọ
 - Cần vận hành thêm Cassandra (heap 1 GB trong demo) và Derby metastore cho Hive.
 - Mọi bảng phục vụ có thể dựng lại từ lake bằng `python -m src.spark_batch_job`.
 - Kiểm thử tính đúng: số dòng Cassandra phải khớp đầu ra Spark (`tests/test_cassandra_counts.py`).
+- `user_recommendations` có 10 dòng cho mỗi user (500.000 dòng, 50.000 partition nhỏ, 11,4 MB trên đĩa): đổi lấy việc dashboard chỉ đọc một partition thay vì ghép hai truy vấn lúc đọc, và loại được phim đã xem ngay ở batch (Cassandra không có anti-join lúc đọc). Bảng ALS thêm 498.320 dòng nữa (49.832 user có lịch sử, 12,8 MB).

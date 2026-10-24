@@ -20,7 +20,9 @@ def directory_mb(path: Path) -> float:
 def cassandra_mb() -> float:
     subprocess.run(["docker", "exec", CASSANDRA, "nodetool", "flush", "movie_analytics"], check=True, capture_output=True)
     out = subprocess.run(
-        ["docker", "exec", CASSANDRA, "du", "-sk", "/var/lib/cassandra/data/movie_analytics"],
+        # snapshots/ holds the automatic backups Cassandra takes of a table before every TRUNCATE (each batch run
+        # truncates the serving tables); they are not live data and are removed by `nodetool clearsnapshot`.
+        ["docker", "exec", CASSANDRA, "du", "-sk", "--exclude=snapshots", "/var/lib/cassandra/data/movie_analytics"],
         check=True, capture_output=True, text=True,
     ).stdout
     return round(int(out.split()[0]) / 1024, 1)
@@ -31,10 +33,10 @@ def main() -> None:
     rows = [{"store": "raw CSV (data/*.csv)", "size_mb": raw_csv}]
     for zone in ("raw", "curated", "analytics"):
         rows.append({"store": f"Hive/Parquet {zone}.db", "size_mb": directory_mb(WAREHOUSE / f"{zone}.db")})
-    rows.append({"store": "Cassandra movie_analytics (13 serving tables, RF=1)", "size_mb": cassandra_mb()})
+    rows.append({"store": "Cassandra movie_analytics keyspace (serving, metadata and live tables, RF=1)", "size_mb": cassandra_mb()})
     write_results(
         "storage_footprint", rows, "Storage footprint",
-        ["Measured as file sizes after `nodetool flush`; Cassandra data is LZ4-compressed SSTables."],
+        ["Measured as file sizes after `nodetool flush`, without truncate snapshots; Cassandra data is LZ4-compressed SSTables."],
     )
 
 
