@@ -1,4 +1,3 @@
--- Processed table used by the dashboard and downstream APIs.
 CREATE TABLE IF NOT EXISTS `movie_analytics.movie_performance` (
   movie_id STRING NOT NULL,
   title STRING NOT NULL,

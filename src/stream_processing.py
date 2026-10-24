@@ -1,9 +1,3 @@
-"""Simulate event-time stream processing with five-minute windows.
-
-In production, Flink would consume these events from Kafka. For the classroom
-demo, this script replays watch_history.csv in timestamp order and produces the
-same kind of windowed trending result without extra infrastructure.
-"""
 from __future__ import annotations
 
 import argparse
