@@ -1,4 +1,4 @@
-﻿# Movie Streaming Analytics Platform
+# Movie Streaming Analytics Platform
 
 A reference data-processing project covering BR1-BR10: movie search, trending,
 recommendations, ratings, genre popularity, engagement, movie performance,
@@ -9,18 +9,26 @@ low-engagement detection, user segmentation, and time-based trends.
 ```text
 CSV source files
       |
-      +--> Spark batch --> 10 dashboard tables ---------+
-      |                                                  |
-      +--> Kafka --> Flink 5-minute windows --> Kafka ---+--> Streamlit
-                                  |                       |
-                           BR2 live trending       materializer
+      +--> Spark batch --> Hive/Parquet lake (raw -> curated -> analytics) --+
+      |                                                                      v
+      |                                         Cassandra serving tables --> Streamlit
+      |                                                  ^
+      +--> Kafka --> Flink 5-minute windows --> Kafka --> materializer
 ```
 
-The batch pipeline creates shared analytics tables for the dashboard. It is
-not one Spark job per BR: one run reads the source data and builds the tables
-used by multiple requirements. Pandas is available for lightweight local
-development; the full Docker stack uses Spark for batch. Both batch engines
-write compatible files to `data/processed/`.
+Data management (see [docs/storage_decision.md](docs/storage_decision.md) for the ADR):
+
+* **Serving layer: Apache Cassandra 5.0.** One table per dashboard query
+  ([sql/cassandra_schema.cql](sql/cassandra_schema.cql)); the live trending stream is a time-series
+  table with a 3-day TTL. The dashboard reads only from Cassandra.
+* **Lake layer: Hive tables on Parquet** (Spark SQL with Hive support, embedded Derby metastore,
+  warehouse in `data/warehouse/`): `raw.*` (schema-explicit copy of the CSVs), `curated.*`
+  (UTC timestamps, de-duplicated; `curated.watch_events` partitioned by `watch_date`) and
+  `analytics.*` (the 10 dashboard tables).
+
+One Spark run reads the CSVs, builds the lake zones, computes the dashboard tables and loads them into
+Cassandra. The Pandas pipeline (`src/batch_processing.py`) is a lightweight twin that writes the same
+tables as CSV.
 
 ## Business requirement coverage
 
@@ -44,110 +52,62 @@ updates the dashboard snapshot. This is real Kafka-to-Flink stream processing;
 the producer is a repeatable demo source. The other batch tables are produced
 by one Pandas or Spark run, not ten independent jobs.
 
-## Run locally
+## Run the full stack with Docker (recommended)
 
-Use Python 3.12 or 3.13. The dashboard and Pandas batch pipeline need the base
-requirements:
-
-```powershell
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-
-# Optional: recreate demo data.
-python generate_data.py
-
-# Batch-only local development with Pandas.
-python -m src.batch_processing
-streamlit run app.py
-```
-
-To run batch processing with Spark locally, install Java and the optional
-Spark dependency, then run:
-
-```powershell
-java -version
-python -m pip install -r requirements-spark.txt
-python -m src.spark_batch_job
-streamlit run app.py
-```
-
-Spark and Flink can be started independently. For Spark, run the batch command
-above in one terminal; it reads the source CSV files and writes the analytics
-CSVs. Start the dashboard in another terminal with `streamlit run app.py`.
-Submitting a view event in the dashboard appends it to
-`data/watch_history.csv` and reruns Spark so the batch charts include it.
-
-For only the streaming path, start the Kafka and Flink services in Docker:
-
-```powershell
-docker compose up --build -d kafka kafka-init flink-jobmanager flink-taskmanager flink-trending-job event-producer trending-materializer
-```
-
-That path runs separately from Spark. The form also publishes each submitted
-event to Kafka when Kafka is running. Flink updates the live BR2 CSV after its
-five-minute event-time window closes, and the dashboard refreshes the live
-panel every ten seconds. Start the dashboard separately with
-`streamlit run app.py` from the project folder so it can read the shared
-`data/processed/` files. Stop only the streaming stack with `docker compose down`.
-
-Both batch commands write ten dashboard-compatible CSV tables to
-`data/processed/`. The full Kafka/Flink stream stack is started with Docker
-Compose below.
-
-## Run the full Spark + Flink stack with Docker
-
-Install and start Docker Desktop, then run:
+Install and start Docker Desktop (8 GB memory recommended), then run:
 
 ```powershell
 docker compose up --build
 ```
 
-This starts Kafka, a Flink JobManager and TaskManager, the BR2 Flink job, a
-continuous CSV event producer, a result materializer, and the Streamlit
-dashboard. The dashboard container runs the Spark batch job at startup and
-writes its ten batch tables to `data/processed/`. A dashboard form can append
-a view event to `data/watch_history.csv`, send it to Kafka, and rerun the Spark
-batch job. Flink consumes
-`watch-events`, computes five-minute event-time windows, and publishes to
-`trending-results`. The materializer updates
-`data/processed/live_trending.csv`; the dashboard refreshes that panel every
-ten seconds.
+This starts Kafka, Cassandra (+ `cassandra-init`, which applies the schema), a Flink JobManager and
+TaskManager, the BR2 Flink job, a continuous CSV event producer, the result materializer, a one-shot
+`spark-batch` service (CSV -> Hive/Parquet -> Cassandra, about 4-5 minutes) and the Streamlit
+dashboard, which waits for the batch to finish. Open the dashboard at `http://localhost:8501`, the
+Flink UI at `http://localhost:8081`; Cassandra is on `localhost:9042`.
 
-Open the dashboard at `http://localhost:8501` and the Flink UI at
-`http://localhost:8081`. The first live results appear after the first
-five-minute event window closes. Stop the stack with `Ctrl+C`, then run:
+* The first live BR2 results appear after the first five-minute event window closes.
+* The "Record a movie view" form appends the event to `data/watch_history.csv`, sends it to Kafka and
+  starts the Spark batch **in the background** (status shown in the sidebar); "Refresh batch (Spark)"
+  does the same on demand.
+* Stop with `Ctrl+C`, then `docker compose down` (add `-v` to also drop the Cassandra volume).
+
+The compose setup is a single-machine demo: one Kafka broker/partition, one Flink TaskManager, one
+Cassandra node (RF=1).
+
+## Run pieces locally
+
+Use Python 3.11-3.13. The dashboard needs Cassandra (`docker compose up -d cassandra cassandra-init`):
 
 ```powershell
-docker compose down
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt -r requirements-spark.txt   # Spark needs Java 11/17
+
+python generate_data.py                                  # optional: recreate demo data
+python -m src.spark_batch_job --cassandra-host localhost # lake + Cassandra (needs internet once for the connector jar)
+python -m src.spark_batch_job --no-hive --csv-output-dir data/processed   # Spark, CSV only
+python -m src.batch_processing                           # Pandas twin, CSV only (data/processed)
+$env:CASSANDRA_HOST = "localhost"; streamlit run app.py
 ```
 
-The compose setup is a single-machine learning/demo deployment. Kafka has one
-broker and one partition; Flink has one TaskManager. The stream replays a
-limited slice of the input CSV continuously, while Flink performs Kafka-backed
-stream processing. It is not configured for production availability or durable
-state across container removal.
+Spark batch flags: `--warehouse-dir` (Hive location, default `data/warehouse`), `--no-hive`,
+`--cassandra-host` (default `$CASSANDRA_HOST`), `--csv-output-dir` (optional CSV copy of the 10 tables).
 
 ## Project structure
 
 ```text
-data/                       Raw CSV input
-data/processed/             Dashboard-ready analytical tables
-src/batch_processing.py     Local Pandas batch pipeline
-src/spark_batch_job.py      Spark batch pipeline for the same tables
-src/stream_processing.py    Offline stream replay utility
-src/kafka_event_producer.py CSV-to-Kafka demo producer
-src/trending_materializer.py Kafka result-to-dashboard CSV sink
-flink/flink_trending_job.py PyFlink event-time trending job
-flink/Dockerfile            Flink image with Kafka connector
-requirements-spark.txt      Optional PySpark dependency
-requirements-stream.txt     Kafka producer/materializer dependency
-sql/bigquery_schema.sql     Warehouse table definitions
-app.py                      Streamlit presentation layer
-data_dictionary.md          Raw data definitions
+data/                        Raw CSV input
+data/warehouse/              Hive warehouse + Derby metastore (generated, git-ignored)
+sql/cassandra_schema.cql     Cassandra keyspace and per-query tables
+docs/storage_decision.md     ADR: why Cassandra + Hive/Parquet (Vietnamese)
+src/spark_batch_job.py       Spark batch: lake zones, dashboard tables, Cassandra load
+src/batch_processing.py      Pandas twin of the batch pipeline (CSV output)
+src/cassandra_store.py       Cassandra connection / schema helper
+src/trending_materializer.py Kafka result -> Cassandra live_trending
+src/kafka_event_producer.py  CSV-to-Kafka demo producer
+src/stream_processing.py     Offline stream replay utility
+flink/flink_trending_job.py  PyFlink event-time trending job
+app.py                       Streamlit presentation layer (reads Cassandra)
+data_dictionary.md           Raw data definitions
 ```
-
-`data/processed` is reproducible batch output. Rerun the batch command after
-regenerating raw data. The Docker stack also writes live trending snapshots to
-`live_trending.csv`. `sql/bigquery_schema.sql` remains a BigQuery schema
-reference; this stack currently stores dashboard tables as local CSV files.

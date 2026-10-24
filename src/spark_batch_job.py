@@ -1,27 +1,94 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import tempfile
 from pathlib import Path
 
 from pyspark.sql import DataFrame, SparkSession, functions as F, Window
+from pyspark.sql.types import DateType, IntegerType, StringType, StructField, StructType
 
+CASSANDRA_PACKAGE = "com.datastax.spark:spark-cassandra-connector_2.12:3.5.1"
 RAW_FILES = ("users.csv", "movies.csv", "ratings.csv", "watch_history.csv")
+BATCH_BUCKET = "all"
+
+# Explicit schemas: no inferSchema pass over the files, and drift in the raw files shows up as nulls.
+# Timestamps stay strings in the raw zone (mixed naive / ISO-offset formats) and are parsed in curation.
+RAW_SCHEMAS = {
+    "users": StructType([
+        StructField("user_id", StringType()), StructField("age", IntegerType()),
+        StructField("gender", StringType()), StructField("region", StringType()),
+        StructField("registration_date", DateType()), StructField("subscription_plan", StringType()),
+        StructField("activity_profile", StringType()),
+    ]),
+    "movies": StructType([
+        StructField("movie_id", StringType()), StructField("title", StringType()),
+        StructField("genre", StringType()), StructField("release_year", IntegerType()),
+        StructField("duration", IntegerType()), StructField("content_type", StringType()),
+        StructField("language", StringType()), StructField("maturity_rating", StringType()),
+    ]),
+    "ratings": StructType([
+        StructField("rating_id", StringType()), StructField("user_id", StringType()),
+        StructField("movie_id", StringType()), StructField("rating", IntegerType()),
+        StructField("timestamp", StringType()),
+    ]),
+    "watch_history": StructType([
+        StructField("watch_id", StringType()), StructField("user_id", StringType()),
+        StructField("movie_id", StringType()), StructField("watch_timestamp", StringType()),
+        StructField("watch_duration", IntegerType()), StructField("device", StringType()),
+    ]),
+}
 
 
-def _read_raw(spark: SparkSession, raw_dir: Path) -> tuple[DataFrame, ...]:
+def create_spark(
+    warehouse_dir: Path | None = None, cassandra_host: str | None = None, app_name: str = "movie-analytics-batch"
+) -> SparkSession:
+    """Build a session. With a warehouse dir it uses Hive support (embedded Derby metastore)."""
+    # UTC session time zone: naive raw timestamps are UTC, and ISO values with offsets convert to UTC.
+    builder = (
+        SparkSession.builder.appName(app_name)
+        .config("spark.sql.session.timeZone", "UTC")
+        .config("spark.sql.shuffle.partitions", "16")  # the default 200 is far too many for this data size
+    )
+    if warehouse_dir is not None:
+        warehouse_dir = warehouse_dir.resolve()
+        builder = (
+            builder.config("spark.sql.warehouse.dir", (warehouse_dir / "spark-warehouse").as_posix())
+            .config(
+                "spark.hadoop.javax.jdo.option.ConnectionURL",
+                f"jdbc:derby:;databaseName={(warehouse_dir / 'metastore_db').as_posix()};create=true",
+            )
+            .enableHiveSupport()
+        )
+    if cassandra_host:
+        builder = builder.config("spark.jars.packages", CASSANDRA_PACKAGE).config(
+            "spark.cassandra.connection.host", cassandra_host
+        )
+    spark = builder.getOrCreate()
+    spark.sparkContext.setLogLevel("WARN")
+    return spark
+
+
+def read_raw(spark: SparkSession, raw_dir: Path) -> tuple[DataFrame, ...]:
+    """Read the raw CSVs with explicit schemas (raw zone: nothing is dropped or parsed yet)."""
     missing = [name for name in RAW_FILES if not (raw_dir / name).is_file()]
     if missing:
         raise FileNotFoundError(f"Missing raw files in {raw_dir}: {', '.join(missing)}")
+    return tuple(
+        spark.read.option("header", True).schema(RAW_SCHEMAS[Path(name).stem]).csv(str(raw_dir / name))
+        for name in RAW_FILES
+    )
 
-    options = {"header": True, "inferSchema": True}
-    users = spark.read.options(**options).csv(str(raw_dir / "users.csv"))
-    movies = spark.read.options(**options).csv(str(raw_dir / "movies.csv"))
-    ratings = spark.read.options(**options).csv(str(raw_dir / "ratings.csv"))
-    watches = spark.read.options(**options).csv(str(raw_dir / "watch_history.csv"))
+
+def curate(
+    users: DataFrame, movies: DataFrame, ratings: DataFrame, watches: DataFrame
+) -> tuple[DataFrame, DataFrame, DataFrame, DataFrame]:
+    """Raw -> curated: parse timestamps (UTC), drop duplicate ids and rows with missing values."""
     ratings = ratings.withColumn("timestamp", F.to_timestamp("timestamp"))
     watches = watches.withColumn("watch_timestamp", F.to_timestamp("watch_timestamp"))
+    watches = watches.dropDuplicates(["watch_id"]).dropna()
+    ratings = ratings.dropDuplicates(["rating_id"]).dropna()
     return users, movies, ratings, watches
 
 
@@ -44,10 +111,7 @@ def _write_csv_file(frame: DataFrame, output_dir: Path, name: str) -> None:
 def build_tables(
     users: DataFrame, movies: DataFrame, ratings: DataFrame, watches: DataFrame
 ) -> dict[str, DataFrame]:
-    """Build the batch analytics tables consumed by the Streamlit dashboard."""
-    watches = watches.dropDuplicates(["watch_id"]).dropna()
-    ratings = ratings.dropDuplicates(["rating_id"]).dropna()
-
+    """Build the batch analytics tables from curated frames (see `curate`)."""
     joined = watches.join(movies, "movie_id").join(users, "user_id")
     rating_stats = ratings.groupBy("movie_id").agg(
         F.avg("rating").alias("avg_rating_raw"),
@@ -179,18 +243,107 @@ def spark_create_summary(users: DataFrame, movies: DataFrame, watches: DataFrame
     )
 
 
-def run(raw_dir: Path, output_dir: Path) -> None:
-    # UTC session time zone: naive raw timestamps are UTC, and ISO values with offsets convert to UTC.
-    spark = (
-        SparkSession.builder.appName("movie-analytics-batch")
-        .config("spark.sql.session.timeZone", "UTC")
-        .getOrCreate()
-    )
-    spark.sparkContext.setLogLevel("WARN")
+def serving_frames(tables: dict[str, DataFrame]) -> dict[str, DataFrame]:
+    """Reshape the dashboard tables into the Cassandra tables (one per dashboard query)."""
+    performance = tables["movie_performance"]
+    bucket = F.lit(BATCH_BUCKET).alias("bucket")
+    rated = performance.where(F.col("weighted_rating").isNotNull())
+    return {
+        "movie_performance": performance,
+        "movies_by_genre_rating": rated.select(
+            "genre", "weighted_rating", "movie_id", "title", "avg_rating", "rating_count", "views"
+        ),
+        "top_rated_movies": rated.select(
+            bucket, "weighted_rating", "rating_count", "movie_id", "title", "genre", "avg_rating", "views"
+        ),
+        "top_viewed_movies": performance.select(
+            bucket, "views", "movie_id", "title", "genre", "unique_viewers", "avg_rating",
+            "completion_rate", "watch_hours",
+        ),
+        "low_engagement_movies": tables["low_engagement_movies"].select(
+            bucket, "views", "title", "movie_id", "genre", "completion_rate"
+        ),
+        "genre_popularity": tables["genre_popularity"],
+        "subscription_views": tables["subscription_views"],
+        "user_engagement": tables["user_engagement"],
+        "hourly_views": tables["hourly_views"],
+        "user_segments": tables["user_segments"],
+        "user_preferences": tables["user_preferences"],
+        "daily_views": tables["daily_views"].select(bucket, "day", "views", "unique_viewers"),
+        "summary_metrics": tables["summary_metrics"].select(
+            bucket, "users", "movies", "views", "ratings", "average_rating"
+        ),
+    }
+
+
+def write_cassandra(frames: dict[str, DataFrame], keyspace: str = "movie_analytics") -> dict[str, int]:
+    """Replace the serving tables (truncate + insert) and return the row counts written."""
+    counts: dict[str, int] = {}
+    for name, frame in frames.items():
+        frame = frame.cache()
+        counts[name] = frame.count()
+        (
+            frame.write.format("org.apache.spark.sql.cassandra")
+            .options(table=name, keyspace=keyspace)
+            .option("confirm.truncate", "true")
+            .mode("overwrite")
+            .save()
+        )
+        frame.unpersist()
+        print(f"Cassandra {keyspace}.{name}: {counts[name]:,} rows")
+    return counts
+
+
+def _save_hive(frame: DataFrame, table: str, partition_by: str | None = None) -> None:
+    spark = frame.sparkSession
+    if not spark.catalog.tableExists(table):
+        # A crashed run can leave table files without a metastore entry, which Spark refuses to overwrite.
+        database, name = table.split(".")
+        warehouse = spark.conf.get("spark.sql.warehouse.dir").removeprefix("file:")
+        shutil.rmtree(Path(warehouse) / f"{database}.db" / name, ignore_errors=True)
+    writer = frame.write.mode("overwrite").format("parquet")
+    if partition_by:
+        writer = writer.partitionBy(partition_by)
+    writer.saveAsTable(table)
+    print(f"Hive table {table} written")
+
+
+def run(
+    raw_dir: Path,
+    warehouse_dir: Path | None = Path("data/warehouse"),
+    cassandra_host: str | None = None,
+    csv_output_dir: Path | None = None,
+) -> None:
+    """raw CSV -> raw Parquet -> curated Parquet -> analytics tables -> Hive / Cassandra / optional CSV."""
+    spark = create_spark(warehouse_dir, cassandra_host)
     try:
-        tables = build_tables(*_read_raw(spark, raw_dir))
-        for name, table in tables.items():
-            _write_csv_file(table, output_dir, name)
+        raw = read_raw(spark, raw_dir)
+        if warehouse_dir is not None:
+            for database in ("raw", "curated", "analytics"):
+                spark.sql(f"CREATE DATABASE IF NOT EXISTS {database}")
+            for name, frame in zip(RAW_SCHEMAS, raw):
+                _save_hive(frame, f"raw.{name}")
+            # The curated zone is rebuilt from the raw Parquet tables, not from the CSV files.
+            users, movies, ratings, watches = curate(*(spark.table(f"raw.{name}") for name in RAW_SCHEMAS))
+            watches = watches.withColumn("watch_date", F.to_date("watch_timestamp"))
+            _save_hive(users, "curated.users")
+            _save_hive(movies, "curated.movies")
+            _save_hive(ratings, "curated.ratings")
+            _save_hive(watches.repartition("watch_date"), "curated.watch_events", partition_by="watch_date")
+            curated = tuple(
+                spark.table(f"curated.{name}") for name in ("users", "movies", "ratings", "watch_events")
+            )
+            tables = build_tables(*curated)
+            for name, table in tables.items():
+                _save_hive(table, f"analytics.{name}")
+            tables = {name: spark.table(f"analytics.{name}") for name in tables}
+        else:
+            tables = build_tables(*curate(*raw))
+        if cassandra_host:
+            write_cassandra(serving_frames(tables))
+        if csv_output_dir is not None:
+            for name, table in tables.items():
+                _write_csv_file(table, csv_output_dir, name)
     finally:
         spark.stop()
 
@@ -198,9 +351,18 @@ def run(raw_dir: Path, output_dir: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build dashboard analytics tables with Apache Spark.")
     parser.add_argument("--raw-dir", type=Path, default=Path("data"))
-    parser.add_argument("--output-dir", type=Path, default=Path("data/processed"))
+    parser.add_argument(
+        "--warehouse-dir", type=Path, default=Path(os.getenv("WAREHOUSE_DIR", "data/warehouse")),
+        help="Hive warehouse + metastore location",
+    )
+    parser.add_argument("--no-hive", action="store_true", help="skip the Hive/Parquet lake tables")
+    parser.add_argument(
+        "--cassandra-host", default=os.getenv("CASSANDRA_HOST"),
+        help="write the serving tables to Cassandra (default: $CASSANDRA_HOST; unset = skip)",
+    )
+    parser.add_argument("--csv-output-dir", type=Path, default=None, help="also write the 10 tables as CSV")
     args = parser.parse_args()
-    run(args.raw_dir, args.output_dir)
+    run(args.raw_dir, None if args.no_hive else args.warehouse_dir, args.cassandra_host, args.csv_output_dir)
 
 
 if __name__ == "__main__":

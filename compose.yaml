@@ -36,6 +36,33 @@ services:
       kafka:
         condition: service_healthy
 
+  cassandra:
+    image: cassandra:5.0
+    ports:
+      - "9042:9042"
+    environment:
+      CASSANDRA_CLUSTER_NAME: movie-analytics
+      MAX_HEAP_SIZE: 1G
+      HEAP_NEWSIZE: 256M
+    volumes:
+      - cassandra-data:/var/lib/cassandra
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'DESCRIBE KEYSPACES' >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 40s
+
+  cassandra-init:
+    image: cassandra:5.0
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["cqlsh cassandra -f /sql/cassandra_schema.cql"]
+    volumes:
+      - ./sql:/sql:ro
+    depends_on:
+      cassandra:
+        condition: service_healthy
+
   flink-jobmanager:
     build:
       context: .
@@ -117,22 +144,38 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.stream
-    command: ["python", "src/trending_materializer.py"]
-    volumes:
-      - ./data:/app/data
+    command: ["python", "-m", "src.trending_materializer"]
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       KAFKA_TREND_TOPIC: trending-results
-      OUTPUT_DIR: /app/data/processed
+      CASSANDRA_HOST: cassandra
     depends_on:
       kafka-init:
         condition: service_completed_successfully
+      cassandra-init:
+        condition: service_completed_successfully
     restart: unless-stopped
+
+  # One-shot Spark batch: raw CSV -> Hive/Parquet lake (data/warehouse) -> Cassandra serving tables.
+  spark-batch:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: movie-analytics-app:latest
+    command: ["python", "-m", "src.spark_batch_job"]
+    volumes:
+      - ./data:/app/data
+    environment:
+      CASSANDRA_HOST: cassandra
+    depends_on:
+      cassandra-init:
+        condition: service_completed_successfully
 
   dashboard:
     build:
       context: .
       dockerfile: Dockerfile
+    image: movie-analytics-app:latest
     ports:
       - "8501:8501"
     volumes:
@@ -140,9 +183,15 @@ services:
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       KAFKA_WATCH_TOPIC: watch-events
+      CASSANDRA_HOST: cassandra
     depends_on:
+      spark-batch:
+        condition: service_completed_successfully
       flink-trending-job:
         condition: service_started
       trending-materializer:
         condition: service_started
     restart: unless-stopped
+
+volumes:
+  cassandra-data:

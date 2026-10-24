@@ -1,40 +1,47 @@
 ﻿from __future__ import annotations
 
-import csv
 import json
 import os
-import tempfile
 from datetime import datetime, timezone
-from pathlib import Path
 
+from cassandra.cluster import Session
 from kafka import KafkaConsumer
 
-OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "data/processed"))
+from src.cassandra_store import wait_for_cassandra
+
 TOPIC = os.getenv("KAFKA_TREND_TOPIC", "trending-results")
 BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
-FIELDS = ["window_start", "rank", "movie_id", "title", "genre", "live_views", "unique_viewers"]
+TABLE = os.getenv("TRENDING_TABLE", "live_trending")
+KEYSPACE = os.getenv("CASSANDRA_KEYSPACE", "movie_analytics")
+TOP_N = 10
 
 
-def write_snapshot(window_start_ms: int, movies: dict[str, dict]) -> None:
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+def rank_movies(movies: dict[str, dict]) -> list[dict]:
     ranked = sorted(
         movies.values(),
         key=lambda row: (-row["live_views"], -row["unique_viewers"], row["title"]),
-    )[:10]
-    window_start = datetime.fromtimestamp(window_start_ms / 1000, tz=timezone.utc).isoformat()
-    destination = OUTPUT_DIR / "live_trending.csv"
-    with tempfile.NamedTemporaryFile(
-        "w", newline="", encoding="utf-8", dir=OUTPUT_DIR, delete=False, suffix=".tmp"
-    ) as temp_file:
-        writer = csv.DictWriter(temp_file, fieldnames=FIELDS)
-        writer.writeheader()
-        for rank, movie in enumerate(ranked, start=1):
-            writer.writerow({"window_start": window_start, "rank": rank, **movie})
-        temp_path = Path(temp_file.name)
-    os.replace(temp_path, destination)
+    )[:TOP_N]
+    return [{**movie, "rank": rank} for rank, movie in enumerate(ranked, start=1)]
+
+
+def write_snapshot(session: Session, window_start_ms: int, movies: dict[str, dict]) -> None:
+    """Upsert the top-N rows of one window; ranks 1..N are overwritten in place so reruns are idempotent."""
+    window_start = datetime.fromtimestamp(window_start_ms / 1000, tz=timezone.utc)
+    statement = session.prepare(
+        f"INSERT INTO {KEYSPACE}.{TABLE} "
+        "(day, window_start, rank, movie_id, title, genre, live_views, unique_viewers) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    for row in rank_movies(movies):
+        session.execute(
+            statement,
+            (window_start.date(), window_start, row["rank"], row["movie_id"], row["title"],
+             row["genre"], row["live_views"], row["unique_viewers"]),
+        )
 
 
 def consume_results() -> None:
+    session = wait_for_cassandra()
     consumer = KafkaConsumer(
         TOPIC,
         bootstrap_servers=BOOTSTRAP,
@@ -46,23 +53,32 @@ def consume_results() -> None:
     active_window: int | None = None
     current_movies: dict[str, dict] = {}
     try:
-        for message in consumer:
-            result = message.value
-            window_start = int(result["window_start_ms"])
-            if active_window is None or window_start > active_window:
-                active_window = window_start
-                current_movies = {}
-            if window_start < active_window:
-                continue
-            movie_id = str(result["movie_id"])
-            current_movies[movie_id] = {
-                "movie_id": movie_id,
-                "title": result["title"],
-                "genre": result["genre"],
-                "live_views": int(result["live_views"]),
-                "unique_viewers": int(result["unique_viewers"]),
-            }
-            write_snapshot(active_window, current_movies)
+        while True:
+            # Poll in batches: one Cassandra snapshot per poll instead of one per Kafka message.
+            polled = consumer.poll(timeout_ms=1000, max_records=2000)
+            touched = False
+            for messages in polled.values():
+                for message in messages:
+                    result = message.value
+                    window_start = int(result["window_start_ms"])
+                    if active_window is None or window_start > active_window:
+                        if touched and current_movies:
+                            write_snapshot(session, active_window, current_movies)
+                        active_window = window_start
+                        current_movies = {}
+                    if window_start < active_window:
+                        continue
+                    movie_id = str(result["movie_id"])
+                    current_movies[movie_id] = {
+                        "movie_id": movie_id,
+                        "title": result["title"],
+                        "genre": result["genre"],
+                        "live_views": int(result["live_views"]),
+                        "unique_viewers": int(result["unique_viewers"]),
+                    }
+                    touched = True
+            if touched and active_window is not None:
+                write_snapshot(session, active_window, current_movies)
     finally:
         consumer.close()
 
