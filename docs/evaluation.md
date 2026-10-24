@@ -227,7 +227,7 @@ Kết luận: ở quy mô đồ án Pandas đủ và nhanh hơn; Spark cần thi
 
 ### 6.4 Ba phương pháp gợi ý BR3
 
-| Tiêu chí | Popularity (mốc) | Theo thể loại (triển khai chính) | ALS (phương án thay thế) | Bằng chứng |
+| Tiêu chí | Popularity (mốc) | Theo thể loại (giải thích được, dự phòng cold start) | ALS (mặc định trên dashboard) | Bằng chứng |
 |---|---|---|---|---|
 | C13 Chất lượng gợi ý | 5 | 2 | 4 | precision/NDCG/hit rate ở `recommender_eval.md` |
 | C14 Độ phủ, cá nhân hoá | 1 | 2 | 4 | độ phủ 0,13% / 0,48% / 2,67% của danh mục |
@@ -237,7 +237,7 @@ Kết luận: ở quy mô đồ án Pandas đủ và nhanh hơn; Spark cần thi
 | Giải thích được cho người xem | 3 | 5 | 2 | cột "Why": thể loại ưa thích / phổ biến / người xem tương tự |
 | C1 Đúng đắn (không gợi ý phim đã xem) | 5 | 5 | 5 | `tests/test_recommendations.py`, `br_effectiveness.md` (200 user ngẫu nhiên, 0 vi phạm) |
 
-Kết luận: không phương pháp nào thắng mọi tiêu chí. Popularity là mốc cần vượt và là phần bù cho user cold start; **ALS cá nhân hoá hơn và chính xác hơn gợi ý theo thể loại trên dữ liệu này nhưng cần lịch sử xem và tốn huấn luyện**; gợi ý theo thể loại rẻ nhất trong các phương pháp cá nhân hoá, giải thích được và luôn có kết quả. Dashboard cho người xem chọn giữa hai phương pháp cá nhân hoá; điểm 1-5 là nhận định của nhóm dựa trên các số đo ở trên.
+Kết luận: không phương pháp nào thắng mọi tiêu chí. Popularity là mốc cần vượt và là phần bù cho user cold start; **ALS cá nhân hoá hơn và chính xác hơn gợi ý theo thể loại trên dữ liệu này nhưng cần lịch sử xem và tốn huấn luyện**; gợi ý theo thể loại rẻ nhất trong các phương pháp cá nhân hoá, giải thích được và luôn có kết quả. Dashboard cho người xem chọn giữa hai phương pháp cá nhân hoá và **mặc định là ALS** vì các số đo trên; gợi ý theo thể loại vẫn là lựa chọn thứ hai và là dự phòng cho user chưa có lịch sử. Siêu tham số ALS chưa được tinh chỉnh: việc đó cần một tập kiểm định riêng cắt từ giai đoạn huấn luyện (không dùng tập kiểm tra), là việc cần làm sau; điểm 1-5 là nhận định của nhóm dựa trên các số đo ở trên.
 
 ## 7. Giới hạn và những gì chưa đo
 

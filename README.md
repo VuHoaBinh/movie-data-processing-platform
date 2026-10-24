@@ -36,7 +36,7 @@ tables as CSV.
 |---|---|---|
 | BR1 | Movie Search & Filtering | Viewer searches titles and filters by genre from the movie catalogue. |
 | BR2 | Trending Movie Detection | Viewer sees popular movies and the latest five-minute Kafka/Flink window. |
-| BR3 | Personalized Movie Recommendation | Viewer gets ten unwatched titles, precomputed per user: genre-based (best-rated titles in their top two watched genres, popular titles as filler) or Spark MLlib ALS (similar viewers); the page lets the viewer pick the recommender. |
+| BR3 | Personalized Movie Recommendation | Viewer gets ten unwatched titles, precomputed per user: genre-based (best-rated titles in their top two watched genres, popular titles as filler) or Spark MLlib ALS (similar viewers); the page lets the viewer pick the recommender (ALS is the default, genre-based the alternative and the fallback for users without watch history). |
 | BR4 | Movie Rating Analytics | Analyst sees the overall rating metric and highest-rated movies with rating counts. |
 | BR5 | Genre Popularity Analysis | Analyst compares views and unique viewers by genre (two charts and a table with views per viewer). |
 | BR6 | User Engagement Analysis | Analyst reviews views, watch minutes and active days per user (KPI cards with mean and median, three histograms, filters by plan and region), subscription usage and viewing hours. |

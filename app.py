@@ -36,16 +36,19 @@ STAGE_ORDER = ["hive_raw", "hive_curated", "build_tables", "als", "hive_analytic
 ACCENT = "#4C78A8"
 SEGMENT_COLORS = {"Inactive": "#E4572E", "Casual": "#F3A712", "Active": "#29A375"}
 PLAN_COLORS = {"Basic": "#9DB4D8", "Standard": "#5C80BC", "Premium": "#2D4A82"}
+# The first entry is the default of the radio: ALS measured better than the genre-based lists offline
+# (docs/evaluation.md 3.4); genre-based stays as the explainable alternative and as the fallback for users
+# without watch history, who have no ALS list.
 RECOMMENDERS = {
-    "Genre-based": (
-        "user_recommendations",
-        "Takes the user's two most-watched genres and lists the best Bayesian-rated titles in them that the user "
-        "has not watched; users with no history get the most-viewed titles.",
-    ),
     "Collaborative filtering (ALS)": (
         "user_recommendations_als",
         "Spark MLlib ALS learns taste factors from who watched what and suggests unwatched titles that similar "
         "viewers watched; it needs at least one watch.",
+    ),
+    "Genre-based": (
+        "user_recommendations",
+        "Takes the user's two most-watched genres and lists the best Bayesian-rated titles in them that the user "
+        "has not watched; users with no history get the most-viewed titles.",
     ),
 }
 
