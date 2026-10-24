@@ -1,4 +1,4 @@
-﻿FROM python:3.12-slim-bookworm
+FROM python:3.12-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -16,9 +16,12 @@ RUN apt-get update \
 COPY requirements.txt requirements-spark.txt ./
 RUN python -m pip install --no-cache-dir --timeout 120 --retries 10 -r requirements.txt -r requirements-spark.txt
 
+# Resolve the Spark-Cassandra and Spark-Kafka connectors at build time so the batch job starts offline.
+RUN python -c "from pyspark.sql import SparkSession; SparkSession.builder.config('spark.jars.packages', 'com.datastax.spark:spark-cassandra-connector_2.12:3.5.1,org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.3').getOrCreate().stop()"
+
 COPY app.py ./
 COPY src ./src
 
 EXPOSE 8501
 
-CMD ["sh", "-c", "python -m src.spark_batch_job && python -m streamlit run app.py --server.address=0.0.0.0 --server.port=8501"]
+CMD ["python", "-m", "streamlit", "run", "app.py", "--server.address=0.0.0.0", "--server.port=8501"]

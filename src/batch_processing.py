@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
 import pandas as pd
@@ -16,9 +17,25 @@ def read_raw(raw_dir: Path) -> tuple[pd.DataFrame, ...]:
 
     users = pd.read_csv(raw_dir / "users.csv")
     movies = pd.read_csv(raw_dir / "movies.csv")
-    ratings = pd.read_csv(raw_dir / "ratings.csv", parse_dates=["timestamp"])
-    watches = pd.read_csv(raw_dir / "watch_history.csv", parse_dates=["watch_timestamp"])
+    ratings = pd.read_csv(raw_dir / "ratings.csv")
+    watches = pd.read_csv(raw_dir / "watch_history.csv")
+    ratings["timestamp"] = parse_timestamps(ratings["timestamp"])
+    watches["watch_timestamp"] = parse_timestamps(watches["watch_timestamp"])
     return users, movies, ratings, watches
+
+
+def parse_timestamps(values: pd.Series) -> pd.Series:
+    """Parse mixed naive/ISO-with-offset strings; naive values are treated as UTC."""
+    return pd.to_datetime(values, format="mixed", utc=True).dt.tz_localize(None)
+
+
+def round_half_up(values: pd.Series, digits: int) -> pd.Series:
+    """Round like Spark's F.round (HALF_UP on the decimal text); pandas rounds half to even."""
+    quantum = Decimal(1).scaleb(-digits)
+    return values.map(
+        lambda value: value if pd.isna(value)
+        else float(Decimal(repr(float(value))).quantize(quantum, rounding=ROUND_HALF_UP))
+    )
 
 
 def build_tables(
@@ -38,6 +55,15 @@ def build_tables(
         ratings.groupby("movie_id", as_index=False)
         .agg(avg_rating=("rating", "mean"), rating_count=("rating_id", "count"))
     )
+    # Bayesian average: shrink each movie's mean toward the global mean C, with
+    # prior weight m = median rating count, so titles with few ratings cannot top BR3/BR4.
+    global_mean = ratings["rating"].mean()
+    min_votes = rating_stats["rating_count"].median()
+    rating_stats["weighted_rating"] = round_half_up(
+        (rating_stats["rating_count"] * rating_stats["avg_rating"] + min_votes * global_mean)
+        / (rating_stats["rating_count"] + min_votes),
+        2,
+    )
     watch_stats = (
         joined.groupby("movie_id", as_index=False)
         .agg(
@@ -55,11 +81,11 @@ def build_tables(
     movie_performance["views"] = movie_performance["views"].fillna(0).astype("int64")
     movie_performance["watch_minutes"] = movie_performance["watch_minutes"].fillna(0)
     movie_performance["unique_viewers"] = movie_performance["unique_viewers"].fillna(0).astype("int64")
-    movie_performance["watch_hours"] = (movie_performance["watch_minutes"] / 60).round(1)
-    movie_performance["completion_rate"] = (
-        movie_performance["avg_watch_minutes"] / movie_performance["duration"] * 100
-    ).clip(upper=100).round(1)
-    movie_performance["avg_rating"] = movie_performance["avg_rating"].round(2)
+    movie_performance["watch_hours"] = round_half_up(movie_performance["watch_minutes"] / 60, 1)
+    movie_performance["completion_rate"] = round_half_up(
+        (movie_performance["avg_watch_minutes"] / movie_performance["duration"] * 100).clip(upper=100), 1
+    )
+    movie_performance["avg_rating"] = round_half_up(movie_performance["avg_rating"], 2)
     movie_performance = movie_performance.drop(columns=["watch_minutes", "avg_watch_minutes"])
     low_engagement_movies = movie_performance.sort_values(
         ["views", "title"], ascending=[True, True]
@@ -127,7 +153,7 @@ def build_tables(
             "movies": len(movies),
             "views": len(watches),
             "ratings": len(ratings),
-            "average_rating": round(ratings["rating"].mean(), 2),
+            "average_rating": round_half_up(pd.Series([ratings["rating"].mean()]), 2).iloc[0],
         }]
     )
 

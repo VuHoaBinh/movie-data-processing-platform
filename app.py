@@ -1,15 +1,18 @@
 import csv
 import json
+import math
 import os
 import subprocess
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+
+from src.cassandra_store import BATCH_BUCKET, CassandraUnavailable, connect, query_frame
 
 try:
     from kafka import KafkaProducer
@@ -19,93 +22,149 @@ except ImportError:
 
 st.set_page_config(page_title="Movie Analytics Platform", page_icon="🎬", layout="wide")
 RAW_DIR = Path("data")
-PROCESSED_DIR = RAW_DIR / "processed"
+BATCH_LOG = RAW_DIR / "batch_refresh.log"
+TOP_SHARE = 0.30  # BR7 shows the top 30% of movies by views.
 
 
-@st.cache_data
-def load_data() -> dict[str, pd.DataFrame]:
-    required = [
-        "movie_performance",
-        "low_engagement_movies",
-        "genre_popularity",
-        "subscription_views",
-        "user_engagement",
-        "user_segments",
-        "user_preferences",
-        "daily_views",
-        "hourly_views",
-        "summary_metrics",
-    ]
-    missing = [name for name in required if not (PROCESSED_DIR / f"{name}.csv").exists()]
-    if missing:
-        raise FileNotFoundError(
-            "Processed data is missing. Run python -m src.batch_processing (Pandas) or python -m src.spark_batch_job (Spark)."
-        )
+@st.cache_resource
+def get_session():
+    return connect()
 
-    data = {name: pd.read_csv(PROCESSED_DIR / f"{name}.csv") for name in required}
-    data["movies"] = pd.read_csv(RAW_DIR / "movies.csv")
-    data["users"] = pd.read_csv(RAW_DIR / "users.csv", usecols=["user_id"])
-    data["daily_views"]["day"] = pd.to_datetime(data["daily_views"]["day"])
 
-    return data
+@st.cache_data(ttl=60, show_spinner=False)
+def cql(statement: str, params: tuple = ()) -> pd.DataFrame:
+    """Run one read-only CQL query against the serving layer (cached for a minute)."""
+    return query_frame(get_session(), statement, list(params))
 
 
 try:
-    data = load_data()
-except FileNotFoundError as error:
-    st.error(str(error))
-    st.code("python -m src.batch_processing  # or python -m src.spark_batch_job")
+    get_session()
+except CassandraUnavailable as error:
+    st.error(f"Serving layer unavailable. {error}")
+    st.caption("Start it with `docker compose up -d cassandra cassandra-init`, then run the Spark batch job.")
     st.stop()
 
+metrics_frame = cql("SELECT * FROM summary_metrics WHERE bucket = %s", (BATCH_BUCKET,))
+if metrics_frame.empty:
+    st.error("The serving tables are empty. Run the Spark batch job to load Cassandra.")
+    st.code("python -m src.spark_batch_job --cassandra-host localhost")
+    st.stop()
+metrics = metrics_frame.iloc[0]
+genres = sorted(cql("SELECT genre FROM genre_popularity")["genre"])
 
-movies = data["movies"]
-performance = data["movie_performance"]
-metrics = data["summary_metrics"].iloc[0]
+
+@st.cache_resource
+def batch_runner() -> dict:
+    return {"process": None, "started": None, "dirty": False}
+
+
+def start_batch() -> None:
+    """Start the Spark batch in the background; the UI keeps responding while it runs."""
+    runner = batch_runner()
+    if runner["process"] is not None and runner["process"].poll() is None:
+        runner["dirty"] = True  # rerun once the current batch finishes
+        return
+    log = BATCH_LOG.open("w", encoding="utf-8")
+    runner["process"] = subprocess.Popen(
+        [sys.executable, "-m", "src.spark_batch_job"], stdout=log, stderr=subprocess.STDOUT
+    )
+    runner["started"] = datetime.now(timezone.utc)
+    runner["dirty"] = False
+
+
+@st.fragment(run_every="5s")
+def render_batch_status() -> None:
+    runner = batch_runner()
+    process = runner["process"]
+    if process is None:
+        st.caption("Batch: idle")
+        return
+    code = process.poll()
+    if code is None:
+        elapsed = int((datetime.now(timezone.utc) - runner["started"]).total_seconds())
+        st.info(f"Spark batch running in the background ({elapsed}s). Charts update when it finishes.")
+    elif runner["dirty"]:
+        start_batch()
+    elif code == 0:
+        st.success("Spark batch finished; Cassandra serving tables are fresh.")
+        if runner.pop("announced", None) != process.pid:
+            runner["announced"] = process.pid
+            st.cache_data.clear()
+            st.rerun()
+    else:
+        st.error(f"Spark batch failed (exit code {code}). See {BATCH_LOG}.")
 
 
 @st.fragment(run_every="10s")
 def render_live_trending() -> None:
-    live_path = PROCESSED_DIR / "live_trending.csv"
     st.subheader("BR2 - Latest 5-minute event window")
-    if not live_path.exists() or live_path.stat().st_size == 0:
-        st.info("Waiting for Flink to complete the first five-minute window.")
-        return
-    live = pd.read_csv(live_path)
+    today = datetime.now(timezone.utc).date()
+    live = pd.DataFrame()
+    for day in (today, today - timedelta(days=1)):
+        live = query_frame(
+            get_session(),
+            "SELECT window_start, rank, title, genre, live_views, unique_viewers "
+            "FROM live_trending WHERE day = %s LIMIT 10",
+            [day],
+        )
+        if not live.empty:
+            break
     if live.empty:
         st.info("Waiting for Flink to complete the first five-minute window.")
         return
-    parsed_windows = pd.to_datetime(live["window_start"], utc=True)
-    latest_time = parsed_windows.max()
+    latest_time = pd.Timestamp(live["window_start"].max()).tz_localize("UTC")
     if pd.Timestamp.now(tz="UTC") - latest_time > pd.Timedelta(minutes=10):
         st.info(f"Waiting for a fresh Flink result. Last result: {latest_time.isoformat()}")
         return
-    latest = live.loc[parsed_windows == latest_time]
     st.caption(f"Window started: {latest_time.isoformat()} - refreshes every 10 seconds")
     st.dataframe(
-        latest[["rank", "title", "genre", "live_views", "unique_viewers"]],
+        live[["rank", "title", "genre", "live_views", "unique_viewers"]],
         hide_index=True,
         use_container_width=True,
     )
 
 
+def catalog_for(genre: str) -> pd.DataFrame:
+    selected = genres if genre == "All" else [genre]
+    frames = [
+        cql(
+            "SELECT movie_id, title, genre, release_year, duration, views, avg_rating, completion_rate "
+            "FROM movie_performance WHERE genre = %s",
+            (name,),
+        )
+        for name in selected
+    ]
+    return pd.concat(frames, ignore_index=True).sort_values("views", ascending=False)
+
+
 st.title("Movie Streaming Analytics Platform")
 page = st.sidebar.radio("Workspace", ["Viewer", "Analyst", "Manager"])
+if st.sidebar.button("Refresh batch (Spark)"):
+    start_batch()
+with st.sidebar:
+    render_batch_status()
 
 with st.expander("Record a movie view (demo input)"):
-    st.caption("Submit ghi sự kiện vào CSV, gửi vào Kafka cho BR2 và chạy lại batch để cập nhật các chart.")
+    st.caption(
+        "Submit appends the event to the raw CSV, sends it to Kafka for BR2 and refreshes the batch "
+        "tables with Spark in the background."
+    )
+    users = cql("SELECT user_id FROM user_engagement")["user_id"].sort_values().tolist()
+    movie_options = cql("SELECT movie_id, title, genre, duration FROM movie_performance").sort_values("movie_id")
     with st.form("record_watch"):
-        form_user = st.selectbox("User", data["users"]["user_id"].tolist())
+        form_user = st.selectbox("User", users)
         form_movie = st.selectbox(
-            "Movie", movies["movie_id"].tolist(),
-            format_func=lambda movie_id: movies.loc[movies["movie_id"] == movie_id, "title"].iloc[0],
+            "Movie", movie_options["movie_id"].tolist(),
+            format_func=lambda movie_id: movie_options.loc[movie_options["movie_id"] == movie_id, "title"].iloc[0],
         )
-        movie_duration = int(movies.loc[movies["movie_id"] == form_movie, "duration"].iloc[0])
+        movie_duration = int(movie_options.loc[movie_options["movie_id"] == form_movie, "duration"].iloc[0])
         form_minutes = st.slider("Minutes watched", min_value=1, max_value=max(1, movie_duration), value=max(1, movie_duration // 2))
         form_device = st.selectbox("Device", ["Web", "Mobile", "Tablet", "TV"])
         submitted = st.form_submit_button("Save view event")
 
     if submitted:
-        timestamp = datetime.now(timezone.utc).isoformat()
+        # Match the raw CSV format (naive UTC, "YYYY-MM-DD HH:MM:SS") so batch parsing stays uniform.
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         event = {
             "watch_id": f"FORM-{uuid.uuid4().hex[:12]}",
             "user_id": form_user,
@@ -114,8 +173,7 @@ with st.expander("Record a movie view (demo input)"):
             "watch_duration": form_minutes,
             "device": form_device,
         }
-        watches_path = RAW_DIR / "watch_history.csv"
-        with watches_path.open("a", newline="", encoding="utf-8") as csv_file:
+        with (RAW_DIR / "watch_history.csv").open("a", newline="", encoding="utf-8") as csv_file:
             csv.writer(csv_file).writerow(event.values())
 
         kafka_sent = False
@@ -126,7 +184,7 @@ with st.expander("Record a movie view (demo input)"):
                     value_serializer=lambda value: json.dumps(value, ensure_ascii=False).encode("utf-8"),
                     acks="all",
                 )
-                movie_row = movies.loc[movies["movie_id"] == form_movie].iloc[0]
+                movie_row = movie_options.loc[movie_options["movie_id"] == form_movie].iloc[0]
                 producer.send(
                     os.getenv("KAFKA_WATCH_TOPIC", "watch-events"),
                     key=str(form_movie).encode("utf-8"),
@@ -140,68 +198,61 @@ with st.expander("Record a movie view (demo input)"):
                 producer.close()
                 kafka_sent = True
             except Exception as error:
-                st.warning(f"Đã lưu vào CSV, nhưng chưa gửi được Kafka: {error}")
+                st.warning(f"Saved to CSV, but could not send to Kafka: {error}")
 
-        try:
-            subprocess.run(
-                [sys.executable, "-m", "src.spark_batch_job"],
-                check=True, capture_output=True, text=True,
-            )
-            batch_engine = "Spark"
-        except (subprocess.CalledProcessError, ModuleNotFoundError):
-            subprocess.run([sys.executable, "-m", "src.batch_processing"], check=True)
-            batch_engine = "Pandas (Spark chưa sẵn sàng)"
-        st.cache_data.clear()
+        start_batch()
         st.success(
-            f"Đã ghi event {event['watch_id']} vào watch_history.csv và cập nhật các bảng bằng {batch_engine}. "
-            + ("Sự kiện đã gửi tới Kafka; BR2 sẽ đổi khi Flink hoàn tất cửa sổ 5 phút." if kafka_sent else "BR2 live cần Kafka/Flink đang chạy.")
+            f"Event {event['watch_id']} saved to watch_history.csv; the Spark batch is refreshing in the background. "
+            + ("Sent to Kafka; BR2 changes when Flink closes the 5-minute window." if kafka_sent else "BR2 live needs Kafka/Flink running.")
         )
-        st.rerun()
 
 if page == "Viewer":
     st.subheader("BR1 - Movie Search & Filtering")
     search_col, genre_col = st.columns([2, 1])
     query = search_col.text_input("Search title")
-    genre = genre_col.selectbox("Genre", ["All"] + sorted(movies["genre"].unique()))
+    genre = genre_col.selectbox("Genre", ["All"] + genres)
 
-    found = movies[movies["title"].str.contains(query, case=False, na=False, regex=False)]
-    if genre != "All":
-        found = found[found["genre"] == genre]
-    catalog = found.merge(
-        performance[["movie_id", "views", "avg_rating", "completion_rate"]],
-        on="movie_id",
-        how="left",
-    ).sort_values("views", ascending=False)
+    # Cassandra has no substring search: read the genre partition(s) by key, filter titles here.
+    catalog = catalog_for(genre)
+    catalog = catalog[catalog["title"].str.contains(query, case=False, na=False, regex=False)]
     st.dataframe(catalog, hide_index=True, use_container_width=True)
 
     left, right = st.columns(2)
     with left:
         st.subheader("BR2 - Trending Movie Detection")
         st.dataframe(
-            performance.nlargest(10, "views")[["title", "genre", "views", "avg_rating"]],
+            cql(
+                "SELECT title, genre, views, avg_rating FROM top_viewed_movies WHERE bucket = %s LIMIT 10",
+                (BATCH_BUCKET,),
+            ),
             hide_index=True,
             use_container_width=True,
         )
 
     with right:
-        selected_user = st.selectbox("Recommendations for", data["users"]["user_id"])
-        preference = data["user_preferences"].query("user_id == @selected_user")
-        favorite_genres = (
-            preference.iloc[0]["favorite_genres"].split("|") if not preference.empty else []
-        )
+        selected_user = st.selectbox("Recommendations for", users)
+        preference = cql("SELECT favorite_genres FROM user_preferences WHERE user_id = %s", (selected_user,))
+        favorite_genres = preference.iloc[0]["favorite_genres"].split("|") if not preference.empty else []
         st.subheader("BR3 - Personalized Movie Recommendation")
         if favorite_genres:
-            recommendations = performance[
-                performance["genre"].isin(favorite_genres)
-            ].nlargest(8, "avg_rating")
+            # Top 8 of the union is contained in the union of each genre's top 8.
+            recommendations = pd.concat(
+                [
+                    cql(
+                        "SELECT title, genre, weighted_rating, avg_rating, rating_count, views "
+                        "FROM movies_by_genre_rating WHERE genre = %s LIMIT 8",
+                        (name,),
+                    )
+                    for name in favorite_genres
+                ]
+            ).nlargest(8, "weighted_rating")
         else:
             st.caption("No viewing history yet; showing popular picks.")
-            recommendations = performance.nlargest(8, "views")
-        st.dataframe(
-            recommendations[["title", "genre", "avg_rating", "views"]],
-            hide_index=True,
-            use_container_width=True,
-        )
+            recommendations = cql(
+                "SELECT title, genre, avg_rating, views FROM top_viewed_movies WHERE bucket = %s LIMIT 8",
+                (BATCH_BUCKET,),
+            )
+        st.dataframe(recommendations, hide_index=True, use_container_width=True)
 
     render_live_trending()
 
@@ -214,11 +265,16 @@ elif page == "Analyst":
     col4.metric("Average rating", f"{metrics['average_rating']:.2f} / 5")
 
     st.markdown("**BR4 - Movie Rating Analytics**")
-    rated_movies = performance.dropna(subset=["avg_rating"]).sort_values(
-        ["avg_rating", "rating_count"], ascending=[False, False]
+    st.caption(
+        "Ranked by Bayesian weighted rating: each average is pulled toward the overall mean "
+        "until a title has about the median number of ratings."
     )
     st.dataframe(
-        rated_movies[["title", "genre", "avg_rating", "rating_count"]].head(10),
+        cql(
+            "SELECT title, genre, weighted_rating, avg_rating, rating_count "
+            "FROM top_rated_movies WHERE bucket = %s LIMIT 10",
+            (BATCH_BUCKET,),
+        ),
         hide_index=True,
         use_container_width=True,
     )
@@ -227,7 +283,7 @@ elif page == "Analyst":
     left, right = st.columns(2)
     left.plotly_chart(
         px.bar(
-            data["genre_popularity"],
+            cql("SELECT genre, views, unique_viewers FROM genre_popularity").sort_values("views", ascending=False),
             x="genre",
             y="views",
             color="genre",
@@ -237,7 +293,12 @@ elif page == "Analyst":
         use_container_width=True,
     )
     st.markdown("**BR7 - Movie Performance Analysis**")
-    top_movies = performance[performance["views"] >= performance["views"].quantile(0.70)]
+    top_n = math.ceil(int(metrics["movies"]) * TOP_SHARE)
+    top_movies = cql(
+        "SELECT title, genre, views, avg_rating, completion_rate, watch_hours "
+        "FROM top_viewed_movies WHERE bucket = %s LIMIT %s",
+        (BATCH_BUCKET, top_n),
+    )
     performance_chart = px.scatter(
         top_movies,
         x="views",
@@ -256,13 +317,13 @@ elif page == "Analyst":
     left, right = st.columns(2)
     left.plotly_chart(
         px.histogram(
-            data["user_engagement"], x="views", nbins=30, title="User engagement distribution"
+            cql("SELECT views FROM user_engagement"), x="views", nbins=30, title="User engagement distribution"
         ),
         use_container_width=True,
     )
     right.plotly_chart(
         px.pie(
-            data["subscription_views"],
+            cql("SELECT subscription_plan, views FROM subscription_views"),
             names="subscription_plan",
             values="views",
             title="Views by subscription plan",
@@ -270,7 +331,7 @@ elif page == "Analyst":
         use_container_width=True,
     )
     st.plotly_chart(
-        px.bar(data["hourly_views"], x="hour", y="views", title="Viewing hours"),
+        px.bar(cql("SELECT hour, views FROM hourly_views").sort_values("hour"), x="hour", y="views", title="Viewing hours"),
         use_container_width=True,
     )
 
@@ -278,7 +339,11 @@ else:
     st.subheader("Manager dashboard")
     st.subheader("BR8 - Low-Engagement Movie Detection")
     st.dataframe(
-        data["low_engagement_movies"].head(10),
+        cql(
+            "SELECT movie_id, title, genre, views, completion_rate "
+            "FROM low_engagement_movies WHERE bucket = %s LIMIT 10",
+            (BATCH_BUCKET,),
+        ),
         hide_index=True,
         use_container_width=True,
     )
@@ -286,11 +351,13 @@ else:
     st.markdown("**BR9 - User Segmentation**")
     left, right = st.columns(2)
     left.plotly_chart(
-        px.pie(data["user_segments"], names="segment", values="users", title="User segments"),
+        px.pie(cql("SELECT segment, users FROM user_segments"), names="segment", values="users", title="User segments"),
         use_container_width=True,
     )
     st.markdown("**BR10 - Time-Based Movie Trend Analysis**")
+    daily = cql("SELECT day, views FROM daily_views WHERE bucket = %s", (BATCH_BUCKET,))
+    daily["day"] = pd.to_datetime(daily["day"].astype(str))
     right.plotly_chart(
-        px.line(data["daily_views"], x="day", y="views", title="Daily viewing trend"),
+        px.line(daily.sort_values("day"), x="day", y="views", title="Daily viewing trend"),
         use_container_width=True,
     )

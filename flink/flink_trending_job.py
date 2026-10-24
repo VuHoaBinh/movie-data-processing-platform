@@ -78,17 +78,18 @@ def to_json(result) -> str:
 
 
 def main() -> None:
-    brokers = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
+    brokers = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:29092")
     source_topic = os.getenv("KAFKA_WATCH_TOPIC", "watch-events")
     sink_topic = os.getenv("KAFKA_TREND_TOPIC", "trending-results")
     window_minutes = int(os.getenv("TREND_WINDOW_MINUTES", "5"))
+    window_seconds = int(os.getenv("TREND_WINDOW_SECONDS", str(window_minutes * 60)))
 
     env = StreamExecutionEnvironment.get_execution_environment()
     env.set_parallelism(1)
     env.set_python_executable("/usr/bin/python3")
     env.enable_checkpointing(10_000)
     env.add_jars(
-        "file:///opt/flink/lib/flink-connector-kafka-5.0.0-2.1.jar"
+        "file:///opt/flink/lib/flink-sql-connector-kafka-5.0.0-2.1.jar"
     )
 
     kafka_source = (
@@ -114,7 +115,7 @@ def main() -> None:
     window_results = (
         source.map(parse_watch_event, output_type=event_type)
         .key_by(lambda event: event[0], key_type=Types.STRING())
-        .window(TumblingEventTimeWindows.of(Time.minutes(window_minutes)))
+        .window(TumblingEventTimeWindows.of(Time.seconds(window_seconds)))
         .aggregate(
             MovieWindowAggregate(),
             AddWindowStart(),
