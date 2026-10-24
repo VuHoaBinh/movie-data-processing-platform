@@ -10,3 +10,4 @@ RUN apt-get update \
 
 ENV PYFLINK_CLIENT_EXECUTABLE=/usr/bin/python3
 COPY flink/flink_trending_job.py /opt/flink/usrlib/flink_trending_job.py
+COPY flink/flink_trending_sql_job.py /opt/flink/usrlib/flink_trending_sql_job.py
