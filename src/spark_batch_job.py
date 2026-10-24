@@ -5,17 +5,20 @@ import os
 import shutil
 import tempfile
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from pyspark.sql import DataFrame, SparkSession, functions as F, Window
 from pyspark.sql.types import DateType, IntegerType, StringType, StructField, StructType
 
 from src.data_quality import clean_spark, format_report, report_from_rows
+from src.recommendations import recommend_spark
+from src.recommender_als import build_als_table
 
 CASSANDRA_PACKAGE = "com.datastax.spark:spark-cassandra-connector_2.12:3.5.1"
 RAW_FILES = ("users.csv", "movies.csv", "ratings.csv", "watch_history.csv")
 BATCH_BUCKET = "all"
+CASSANDRA_WRITE_TASKS = 4
 
 # Explicit schemas: no inferSchema pass over the files, and drift in the raw files shows up as nulls.
 # Timestamps stay strings in the raw zone (mixed naive / ISO-offset formats) and are parsed in curation.
@@ -54,6 +57,9 @@ def create_spark(
         SparkSession.builder.appName(app_name)
         .config("spark.sql.session.timeZone", "UTC")
         .config("spark.sql.shuffle.partitions", "16")  # the default 200 is far too many for this data size
+        # Takes effect when this process starts the JVM: the default 1 GB heap runs out while writing the
+        # per-user recommendation tables (500k rows each) next to 20 parallel tasks.
+        .config("spark.driver.memory", os.getenv("SPARK_DRIVER_MEMORY", "2g"))
     )
     if warehouse_dir is not None:
         warehouse_dir = warehouse_dir.resolve()
@@ -66,8 +72,12 @@ def create_spark(
             .enableHiveSupport()
         )
     if cassandra_host:
-        builder = builder.config("spark.jars.packages", CASSANDRA_PACKAGE).config(
-            "spark.cassandra.connection.host", cassandra_host
+        # The single-node Cassandra of the demo (1 GB heap) times out writes when all 20 local tasks write
+        # at once; fewer concurrent statements per task and `CASSANDRA_WRITE_TASKS` tasks per table fix it.
+        builder = (
+            builder.config("spark.jars.packages", CASSANDRA_PACKAGE)
+            .config("spark.cassandra.connection.host", cassandra_host)
+            .config("spark.cassandra.output.concurrent.writes", "2")
         )
     spark = builder.getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
@@ -235,6 +245,8 @@ def build_tables(
         .orderBy("user_id")
     )
 
+    user_recommendations = recommend_spark(users, movie_performance, user_preferences, watches)
+
     daily_views = joined.groupBy(F.to_date("watch_timestamp").alias("day")).agg(
         F.count("watch_id").alias("views"), F.countDistinct("user_id").alias("unique_viewers")
     ).orderBy("day")
@@ -251,6 +263,7 @@ def build_tables(
         "user_engagement": user_engagement,
         "user_segments": user_segments,
         "user_preferences": user_preferences,
+        "user_recommendations": user_recommendations,
         "daily_views": daily_views,
         "hourly_views": hourly_views,
         "summary_metrics": summary_metrics,
@@ -294,6 +307,8 @@ def serving_frames(tables: dict[str, DataFrame]) -> dict[str, DataFrame]:
         "hourly_views": tables["hourly_views"],
         "user_segments": tables["user_segments"],
         "user_preferences": tables["user_preferences"],
+        "user_recommendations": tables["user_recommendations"],
+        **({"user_recommendations_als": tables["user_recommendations_als"]} if "user_recommendations_als" in tables else {}),
         "daily_views": tables["daily_views"].select(bucket, "day", "views", "unique_viewers"),
         "summary_metrics": tables["summary_metrics"].select(
             bucket, "users", "movies", "views", "ratings", "average_rating"
@@ -308,7 +323,7 @@ def write_cassandra(frames: dict[str, DataFrame], keyspace: str = "movie_analyti
         frame = frame.cache()
         counts[name] = frame.count()
         (
-            frame.write.format("org.apache.spark.sql.cassandra")
+            frame.coalesce(CASSANDRA_WRITE_TASKS).write.format("org.apache.spark.sql.cassandra")
             .options(table=name, keyspace=keyspace)
             .option("confirm.truncate", "true")
             .mode("overwrite")
@@ -317,6 +332,31 @@ def write_cassandra(frames: dict[str, DataFrame], keyspace: str = "movie_analyti
         frame.unpersist()
         print(f"Cassandra {keyspace}.{name}: {counts[name]:,} rows")
     return counts
+
+
+def record_batch_run(
+    spark: SparkSession, counts: dict[str, int], stages: dict[str, float],
+    started_at: datetime, finished_at: datetime, keyspace: str = "movie_analytics",
+) -> None:
+    """Pipeline metadata for the dashboard's Data Engineering page: rows written per table and one run row."""
+    (
+        spark.createDataFrame(sorted(counts.items()), "table_name string, rows long")
+        .write.format("org.apache.spark.sql.cassandra").options(table="batch_table_rows", keyspace=keyspace)
+        .option("confirm.truncate", "true").mode("overwrite").save()
+    )
+    run_row = [(
+        BATCH_BUCKET, finished_at.replace(tzinfo=None), started_at.replace(tzinfo=None), "succeeded",
+        (finished_at - started_at).total_seconds(), sum(counts.values()), {k: round(v, 1) for k, v in stages.items()},
+    )]
+    (
+        spark.createDataFrame(
+            run_row,
+            "bucket string, finished_at timestamp, started_at timestamp, status string, seconds double, "
+            "rows_written long, stage_seconds map<string,double>",
+        )
+        .write.format("org.apache.spark.sql.cassandra").options(table="batch_runs", keyspace=keyspace)
+        .mode("append").save()
+    )
 
 
 def _save_hive(frame: DataFrame, table: str, partition_by: str | None = None) -> None:
@@ -333,10 +373,12 @@ def _save_hive(frame: DataFrame, table: str, partition_by: str | None = None) ->
     print(f"Hive table {table} written")
 
 
-def _timed(stage: str, started: float) -> float:
+def _timed(stage: str, started: float, stages: dict[str, float] | None = None) -> float:
     """Print the seconds since `started` as a parseable TIMING line and return a fresh start time."""
     now = time.perf_counter()
     print(f"TIMING {stage} {now - started:.1f}", flush=True)
+    if stages is not None:
+        stages[stage] = now - started
     return now
 
 
@@ -346,8 +388,11 @@ def run(
     cassandra_host: str | None = None,
     csv_output_dir: Path | None = None,
     quality_report: bool = False,
+    als: bool = True,
 ) -> None:
     """raw CSV -> raw Parquet -> curated Parquet -> analytics tables -> Hive / Cassandra / optional CSV."""
+    started_at = datetime.now(timezone.utc)
+    stages: dict[str, float] = {}
     spark = create_spark(warehouse_dir, cassandra_host)
     try:
         raw = read_raw(spark, raw_dir)
@@ -357,7 +402,7 @@ def run(
                 spark.sql(f"CREATE DATABASE IF NOT EXISTS {database}")
             for name, frame in zip(RAW_SCHEMAS, raw):
                 _save_hive(frame, f"raw.{name}")
-            clock = _timed("hive_raw", clock)
+            clock = _timed("hive_raw", clock, stages)
             # The curated zone is rebuilt from the raw Parquet tables, not from the CSV files.
             (users, movies, ratings, watches), quality = curate(*(spark.table(f"raw.{name}") for name in RAW_SCHEMAS))
             quality = quality.cache()
@@ -368,24 +413,33 @@ def run(
             _save_hive(movies, "curated.movies")
             _save_hive(ratings, "curated.ratings")
             _save_hive(watches.repartition("watch_date"), "curated.watch_events", partition_by="watch_date")
-            clock = _timed("hive_curated", clock)
+            clock = _timed("hive_curated", clock, stages)
             curated = tuple(
                 spark.table(f"curated.{name}") for name in ("users", "movies", "ratings", "watch_events")
             )
             tables = build_tables(*curated)
+            clock = _timed("build_tables", clock, stages)
+            if als:
+                tables["user_recommendations_als"] = build_als_table(curated[3], tables["movie_performance"])
+                clock = _timed("als", clock, stages)
             for name, table in tables.items():
                 _save_hive(table, f"analytics.{name}")
             tables = {name: spark.table(f"analytics.{name}") for name in tables}
-            clock = _timed("hive_analytics", clock)
+            clock = _timed("hive_analytics", clock, stages)
         else:
             # Cache the curated frames: each output table would otherwise recompute them from the CSVs.
             frames, quality = curate(*raw)
             if quality_report:  # costs an extra pass over the raw data
                 print(format_report(report_from_rows([tuple(row) for row in quality.collect()])))
             tables = build_tables(*(frame.persist() for frame in frames))
+            clock = _timed("build_tables", clock, stages)
+            if als:
+                tables["user_recommendations_als"] = build_als_table(frames[3], tables["movie_performance"])
+                clock = _timed("als", clock, stages)
         if cassandra_host:
-            write_cassandra(serving_frames(tables))
-            clock = _timed("cassandra_load", clock)
+            counts = write_cassandra({**serving_frames(tables), "quality_report": quality})
+            clock = _timed("cassandra_load", clock, stages)
+            record_batch_run(spark, counts, stages, started_at, datetime.now(timezone.utc))
         if csv_output_dir is not None:
             for name, table in tables.items():
                 _write_csv_file(table, csv_output_dir, name)
@@ -405,13 +459,15 @@ def main() -> None:
         "--cassandra-host", default=os.getenv("CASSANDRA_HOST"),
         help="write the serving tables to Cassandra (default: $CASSANDRA_HOST; unset = skip)",
     )
-    parser.add_argument("--csv-output-dir", type=Path, default=None, help="also write the 10 tables as CSV")
+    parser.add_argument("--csv-output-dir", type=Path, default=None, help="also write the analytics tables as CSV")
+    parser.add_argument("--no-als", action="store_true", help="skip the ALS recommendations (BR3 alternative)")
     parser.add_argument(
         "--quality-report", action="store_true",
         help="print the rejected-row report even without Hive (always printed and saved with Hive)",
     )
     args = parser.parse_args()
-    run(args.raw_dir, None if args.no_hive else args.warehouse_dir, args.cassandra_host, args.csv_output_dir, args.quality_report)
+    run(args.raw_dir, None if args.no_hive else args.warehouse_dir, args.cassandra_host, args.csv_output_dir, args.quality_report,
+        als=not args.no_als)
 
 
 if __name__ == "__main__":

@@ -59,15 +59,29 @@ def fixture_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return directory
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def spark():
+    """A local session per test module. `spark_batch_job.run` stops the active session when it finishes
+    (test_parity calls it), so a session shared by the whole run would be dead for the modules after it;
+    `getOrCreate` hands every module a live one, and `_stop_spark` closes the last at the end."""
     pytest.importorskip("pyspark")
     from src.spark_batch_job import create_spark
 
     session = create_spark(app_name="tests")
     session.conf.set("spark.sql.shuffle.partitions", "4")
-    yield session
-    session.stop()
+    return session
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _stop_spark():
+    yield
+    try:
+        from pyspark.sql import SparkSession
+    except ImportError:
+        return
+    active = SparkSession.getActiveSession()
+    if active is not None:
+        active.stop()
 
 
 def generate(directory: Path, dirty_rate: float = 0.0, **sizes: int) -> Path:

@@ -34,6 +34,21 @@ EXPECTED = {
     ],
     "user_segments": [("Inactive", 2, 3), ("Casual", 1, 11), ("Active", 1, 36)],
     "user_preferences": [("U1", "Action|Drama"), ("U2", "Action"), ("U3", "Drama")],
+    # BR3: every title in a user's favourite genres has been watched by that user (the only unwatched title,
+    # M4, has no rating), so all lists are the popular filler: most views first, watched titles skipped.
+    #   U1 watched M1-M3 -> M4;  U2 watched M1, M2 -> M3, M4;  U3 watched M3 -> M2, M1, M4;  U4 nothing -> all four
+    "user_recommendations": [
+        ("U1", 1, "M4", "Delta", "Drama", "popular", None, None, 0),
+        ("U2", 1, "M3", "Gamma", "Drama", "popular", 4.17, 4.5, 12),
+        ("U2", 2, "M4", "Delta", "Drama", "popular", None, None, 0),
+        ("U3", 1, "M2", "Beta", "Action", "popular", 3.22, 2.0, 34),
+        ("U3", 2, "M1", "Alpha", "Action", "popular", 3.93, 4.0, 4),
+        ("U3", 3, "M4", "Delta", "Drama", "popular", None, None, 0),
+        ("U4", 1, "M2", "Beta", "Action", "popular", 3.22, 2.0, 34),
+        ("U4", 2, "M3", "Gamma", "Drama", "popular", 4.17, 4.5, 12),
+        ("U4", 3, "M1", "Alpha", "Action", "popular", 3.93, 4.0, 4),
+        ("U4", 4, "M4", "Delta", "Drama", "popular", None, None, 0),
+    ],
     # W9 is 12:00+07:00 = 05:00 UTC on 2026-01-03
     "daily_views": [("2026-01-01", 2, 1), ("2026-01-02", 3, 3), ("2026-01-03", 4, 3), ("2026-01-04", 41, 2)],
     "hourly_views": [(5, 1), (8, 32), (9, 9), (10, 3), (11, 2), (12, 1), (22, 1), (23, 1)],
@@ -53,8 +68,8 @@ def test_table_matches_hand_computed_values(tables, name):
     assert records(tables[name]) == EXPECTED[name]
 
 
-def test_all_ten_tables_are_covered(tables):
-    assert set(tables) == set(EXPECTED) and len(EXPECTED) == 10
+def test_all_eleven_tables_are_covered(tables):
+    assert set(tables) == set(EXPECTED) and len(EXPECTED) == 11
 
 
 def test_ratings_in_range_and_bayesian_between_mean_and_raw(tables):

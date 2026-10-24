@@ -1,4 +1,4 @@
-"""Pandas and Spark pipelines must produce exactly the same ten tables and the same rejected counts."""
+"""Pandas and Spark pipelines must produce exactly the same eleven tables and the same rejected counts."""
 from __future__ import annotations
 
 import pytest
@@ -13,7 +13,7 @@ def test_pandas_and_spark_outputs_are_identical(request, spark, dataset):
     raw_dir = request.getfixturevalue(dataset)
     pandas_result, pandas_report = pandas_tables(raw_dir)
     spark_result, spark_report = spark_tables(spark, raw_dir)
-    assert set(pandas_result) == set(spark_result) and len(pandas_result) == 10
+    assert set(pandas_result) == set(spark_result) and len(pandas_result) == 11
     for name, table in pandas_result.items():
         assert list(table.columns) == list(spark_result[name].columns), name
         assert records(table, sort=True) == records(spark_result[name], sort=True), name
