@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS `movie_analytics.movie_performance` (
   unique_viewers INT64,
   avg_rating FLOAT64,
   rating_count INT64,
+  weighted_rating FLOAT64,
   watch_hours FLOAT64,
   completion_rate FLOAT64
 )

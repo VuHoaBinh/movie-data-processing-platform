@@ -6,11 +6,13 @@ services:
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
-      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      # PLAINTEXT (kafka:29092) serves containers; PLAINTEXT_HOST (localhost:9092) serves
+      # clients on the host, such as `streamlit run app.py` outside Docker.
+      KAFKA_LISTENERS: PLAINTEXT://:29092,PLAINTEXT_HOST://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
@@ -28,8 +30,8 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - >-
-        set -e; /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic watch-events --partitions 1 --replication-factor 1;
-        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic trending-results --partitions 1 --replication-factor 1
+        set -e; /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --create --if-not-exists --topic watch-events --partitions 1 --replication-factor 1;
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --create --if-not-exists --topic trending-results --partitions 1 --replication-factor 1
     depends_on:
       kafka:
         condition: service_healthy
@@ -85,7 +87,7 @@ services:
       FLINK_PROPERTIES: |-
         jobmanager.rpc.address: flink-jobmanager
         python.client.executable: /usr/bin/python3
-      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       KAFKA_WATCH_TOPIC: watch-events
       KAFKA_TREND_TOPIC: trending-results
       TREND_WINDOW_MINUTES: 5
@@ -104,7 +106,7 @@ services:
     volumes:
       - ./data:/app/data:ro
     environment:
-      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       KAFKA_WATCH_TOPIC: watch-events
     depends_on:
       kafka-init:
@@ -119,7 +121,7 @@ services:
     volumes:
       - ./data:/app/data
     environment:
-      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       KAFKA_TREND_TOPIC: trending-results
       OUTPUT_DIR: /app/data/processed
     depends_on:
@@ -135,6 +137,9 @@ services:
       - "8501:8501"
     volumes:
       - ./data:/app/data
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_WATCH_TOPIC: watch-events
     depends_on:
       flink-trending-job:
         condition: service_started

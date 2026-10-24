@@ -50,8 +50,22 @@ def build_tables(
 
     joined = watches.join(movies, "movie_id").join(users, "user_id")
     rating_stats = ratings.groupBy("movie_id").agg(
-        F.round(F.avg("rating"), 2).alias("avg_rating"),
+        F.avg("rating").alias("avg_rating_raw"),
         F.count("rating_id").alias("rating_count"),
+    )
+    # Bayesian average: shrink each movie's mean toward the global mean C, with
+    # prior weight m = median rating count, so titles with few ratings cannot top BR3/BR4.
+    global_mean = ratings.agg(F.avg("rating")).first()[0]
+    min_votes = rating_stats.agg(F.median("rating_count")).first()[0]
+    rating_stats = rating_stats.select(
+        "movie_id",
+        "rating_count",
+        F.round("avg_rating_raw", 2).alias("avg_rating"),
+        F.round(
+            (F.col("rating_count") * F.col("avg_rating_raw") + F.lit(min_votes) * F.lit(global_mean))
+            / (F.col("rating_count") + F.lit(min_votes)),
+            2,
+        ).alias("weighted_rating"),
     )
 
     watch_stats = joined.groupBy("movie_id").agg(
@@ -75,19 +89,22 @@ def build_tables(
         .drop("watch_minutes_raw", "avg_watch_minutes")
         .select(
             "movie_id", "title", "genre", "release_year", "duration", "views",
-            "unique_viewers", "avg_rating", "rating_count", "watch_hours", "completion_rate",
+            "unique_viewers", "avg_rating", "rating_count", "weighted_rating", "watch_hours",
+            "completion_rate",
         )
+        .orderBy("movie_id")
     )
     low_engagement_movies = movie_performance.select(
         "movie_id", "title", "genre", "views", "completion_rate"
     ).orderBy(F.asc("views"), F.asc("title"))
 
+    # Spark groupBy output is unordered; every table below is sorted like the Pandas pipeline.
     genre_popularity = joined.groupBy("genre").agg(
         F.count("watch_id").alias("views"), F.countDistinct("user_id").alias("unique_viewers")
-    )
+    ).orderBy(F.desc("views"))
     subscription_views = joined.groupBy("subscription_plan").agg(
         F.count("watch_id").alias("views"), F.countDistinct("user_id").alias("unique_viewers")
-    )
+    ).orderBy("subscription_plan")
 
     engagement_stats = joined.groupBy("user_id").agg(
         F.count("watch_id").alias("views"),
@@ -106,10 +123,14 @@ def build_tables(
             .when(F.col("views") <= 35, "Casual")
             .otherwise("Active"),
         )
-        .select("user_id", "views", "watch_minutes", "active_days", "subscription_plan", "region", "segment")
+        .select("user_id", "subscription_plan", "region", "views", "watch_minutes", "active_days", "segment")
+        .orderBy("user_id")
     )
-    user_segments = user_engagement.groupBy("segment").agg(
-        F.count("user_id").alias("users"), F.sum("views").alias("views")
+    segment_order = F.when(F.col("segment") == "Inactive", 0).when(F.col("segment") == "Casual", 1).otherwise(2)
+    user_segments = (
+        user_engagement.groupBy("segment")
+        .agg(F.count("user_id").alias("users"), F.sum("views").alias("views"))
+        .orderBy(segment_order)
     )
 
     genre_by_user = joined.groupBy("user_id", "genre").agg(F.count(F.lit(1)).alias("genre_views"))
@@ -122,14 +143,15 @@ def build_tables(
         .withColumn("favorite_genres", F.expr("transform(_ranked_genres, x -> x.genre)"))
         .withColumn("favorite_genres", F.concat_ws("|", "favorite_genres"))
         .select("user_id", "favorite_genres")
+        .orderBy("user_id")
     )
 
     daily_views = joined.groupBy(F.to_date("watch_timestamp").alias("day")).agg(
         F.count("watch_id").alias("views"), F.countDistinct("user_id").alias("unique_viewers")
-    )
+    ).orderBy("day")
     hourly_views = joined.groupBy(F.hour("watch_timestamp").alias("hour")).agg(
         F.count("watch_id").alias("views")
-    )
+    ).orderBy("hour")
     summary_metrics = spark_create_summary(users, movies, watches, ratings)
 
     return {
@@ -158,7 +180,12 @@ def spark_create_summary(users: DataFrame, movies: DataFrame, watches: DataFrame
 
 
 def run(raw_dir: Path, output_dir: Path) -> None:
-    spark = SparkSession.builder.appName("movie-analytics-batch").getOrCreate()
+    # UTC session time zone: naive raw timestamps are UTC, and ISO values with offsets convert to UTC.
+    spark = (
+        SparkSession.builder.appName("movie-analytics-batch")
+        .config("spark.sql.session.timeZone", "UTC")
+        .getOrCreate()
+    )
     spark.sparkContext.setLogLevel("WARN")
     try:
         tables = build_tables(*_read_raw(spark, raw_dir))

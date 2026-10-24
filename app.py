@@ -46,6 +46,7 @@ def load_data() -> dict[str, pd.DataFrame]:
     data["movies"] = pd.read_csv(RAW_DIR / "movies.csv")
     data["users"] = pd.read_csv(RAW_DIR / "users.csv", usecols=["user_id"])
     data["daily_views"]["day"] = pd.to_datetime(data["daily_views"]["day"])
+    data["daily_views"] = data["daily_views"].sort_values("day")
 
     return data
 
@@ -105,7 +106,8 @@ with st.expander("Record a movie view (demo input)"):
         submitted = st.form_submit_button("Save view event")
 
     if submitted:
-        timestamp = datetime.now(timezone.utc).isoformat()
+        # Match the raw CSV format (naive UTC, "YYYY-MM-DD HH:MM:SS") so batch parsing stays uniform.
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         event = {
             "watch_id": f"FORM-{uuid.uuid4().hex[:12]}",
             "user_id": form_user,
@@ -193,12 +195,12 @@ if page == "Viewer":
         if favorite_genres:
             recommendations = performance[
                 performance["genre"].isin(favorite_genres)
-            ].nlargest(8, "avg_rating")
+            ].nlargest(8, "weighted_rating")
         else:
             st.caption("No viewing history yet; showing popular picks.")
             recommendations = performance.nlargest(8, "views")
         st.dataframe(
-            recommendations[["title", "genre", "avg_rating", "views"]],
+            recommendations[["title", "genre", "weighted_rating", "avg_rating", "rating_count", "views"]],
             hide_index=True,
             use_container_width=True,
         )
@@ -214,11 +216,15 @@ elif page == "Analyst":
     col4.metric("Average rating", f"{metrics['average_rating']:.2f} / 5")
 
     st.markdown("**BR4 - Movie Rating Analytics**")
-    rated_movies = performance.dropna(subset=["avg_rating"]).sort_values(
-        ["avg_rating", "rating_count"], ascending=[False, False]
+    st.caption(
+        "Ranked by Bayesian weighted rating: each average is pulled toward the overall mean "
+        "until a title has about the median number of ratings."
+    )
+    rated_movies = performance.dropna(subset=["weighted_rating"]).sort_values(
+        ["weighted_rating", "rating_count"], ascending=[False, False]
     )
     st.dataframe(
-        rated_movies[["title", "genre", "avg_rating", "rating_count"]].head(10),
+        rated_movies[["title", "genre", "weighted_rating", "avg_rating", "rating_count"]].head(10),
         hide_index=True,
         use_container_width=True,
     )
