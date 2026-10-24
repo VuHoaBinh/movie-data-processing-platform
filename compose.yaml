@@ -93,7 +93,7 @@ services:
     environment:
       FLINK_PROPERTIES: |-
         jobmanager.rpc.address: flink-jobmanager
-        taskmanager.numberOfTaskSlots: 2
+        taskmanager.numberOfTaskSlots: 4
         python.client.executable: /usr/bin/python3
     depends_on:
       flink-jobmanager:
@@ -109,7 +109,7 @@ services:
       - -lc
       - >-
         until curl -fsS http://flink-jobmanager:8081/overview >/dev/null; do sleep 2; done;
-        flink run -m flink-jobmanager:8081 -py /opt/flink/usrlib/flink_trending_job.py
+        flink run -m flink-jobmanager:8081 -py /opt/flink/usrlib/flink_trending_sql_job.py
     environment:
       FLINK_PROPERTIES: |-
         jobmanager.rpc.address: flink-jobmanager
@@ -171,12 +171,35 @@ services:
       CASSANDRA_HOST: cassandra
       TREND_WINDOW_MINUTES: 5
       TRENDING_TABLE: live_trending_spark
+      CHECKPOINT_DIR: /checkpoints/trending
+    volumes:
+      - spark-checkpoint:/checkpoints  # offsets and window state survive container restarts
     depends_on:
       kafka-init:
         condition: service_completed_successfully
       cassandra-init:
         condition: service_completed_successfully
     restart: unless-stopped
+
+  # Tests and benchmarks inside the stack: `docker compose run --rm --no-deps benchmark <command>`.
+  benchmark:
+    profiles: ["tools"]
+    image: movie-analytics-app:latest
+    working_dir: /app
+    entrypoint: []
+    command: ["python", "-m", "pytest", "-q"]
+    volumes:
+      - ./data:/app/data
+      - ./src:/app/src
+      - ./tests:/app/tests
+      - ./benchmarks:/app/benchmarks
+      - ./sql:/app/sql
+      - ./generate_data.py:/app/generate_data.py
+      - ./pytest.ini:/app/pytest.ini
+    environment:
+      CASSANDRA_HOST: cassandra
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      PYTHONPATH: /app
 
   # One-shot Spark batch: raw CSV -> Hive/Parquet lake (data/warehouse) -> Cassandra serving tables.
   spark-batch:
@@ -217,3 +240,4 @@ services:
 
 volumes:
   cassandra-data:
+  spark-checkpoint:

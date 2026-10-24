@@ -1,0 +1,35 @@
+# Dashboard query latency: Cassandra vs Hive/Parquet
+
+| query | br | kind | store | runs | p50_ms | p95_ms | mean_ms | max_ms |
+|---|---|---|---|---|---|---|---|---|
+| genre_catalog | BR1 | range | cassandra | 200 | 20.15 | 30.136 | 21.666 | 84.886 |
+| genre_catalog | BR1 | range | hive_parquet_sparksql | 20 | 656.043 | 758.624 | 657.137 | 876.9 |
+| top_viewed | BR2 | range | cassandra | 200 | 1.393 | 1.946 | 1.435 | 2.764 |
+| top_viewed | BR2 | range | hive_parquet_sparksql | 20 | 274.685 | 304.415 | 279.189 | 336.427 |
+| user_favorite_genres | BR3 | point | cassandra | 200 | 1.243 | 1.876 | 1.317 | 2.938 |
+| user_favorite_genres | BR3 | point | hive_parquet_sparksql | 20 | 241.281 | 251.553 | 240.111 | 259.003 |
+| genre_top_rated | BR3 | range | cassandra | 200 | 1.403 | 1.964 | 1.432 | 3.542 |
+| genre_top_rated | BR3 | range | hive_parquet_sparksql | 20 | 269.472 | 303.452 | 270.896 | 314.841 |
+| top_rated | BR4 | range | cassandra | 200 | 1.331 | 1.807 | 1.371 | 3.78 |
+| top_rated | BR4 | range | hive_parquet_sparksql | 20 | 255.75 | 275.589 | 256.977 | 282.899 |
+| genre_popularity | BR5 | range | cassandra | 200 | 1.865 | 2.543 | 1.895 | 3.343 |
+| genre_popularity | BR5 | range | hive_parquet_sparksql | 20 | 435.939 | 490.374 | 434.725 | 520.477 |
+| top_share_performance | BR7 | range | cassandra | 200 | 31.991 | 45.252 | 34.778 | 162.835 |
+| top_share_performance | BR7 | range | hive_parquet_sparksql | 20 | 278.43 | 332.325 | 285.75 | 359.707 |
+| user_views_scan | BR6 | scan | cassandra | 30 | 381.574 | 431.042 | 390.239 | 531.067 |
+| user_views_scan | BR6 | scan | hive_parquet_sparksql | 20 | 383.478 | 455.422 | 389.487 | 483.756 |
+| hourly_views | BR6 | range | cassandra | 200 | 1.42 | 2.098 | 1.484 | 5.238 |
+| hourly_views | BR6 | range | hive_parquet_sparksql | 20 | 410.56 | 429.598 | 399.049 | 443.767 |
+| low_engagement | BR8 | range | cassandra | 200 | 1.006 | 1.436 | 1.048 | 1.932 |
+| low_engagement | BR8 | range | hive_parquet_sparksql | 20 | 265.925 | 327.028 | 255.185 | 359.09 |
+| user_segments | BR9 | range | cassandra | 200 | 1.684 | 2.488 | 1.749 | 3.689 |
+| user_segments | BR9 | range | hive_parquet_sparksql | 20 | 476.288 | 563.927 | 480.727 | 614.643 |
+| daily_views | BR10 | range | cassandra | 200 | 1.67 | 2.441 | 1.979 | 49.699 |
+| daily_views | BR10 | range | hive_parquet_sparksql | 20 | 526.364 | 591.66 | 529.327 | 625.836 |
+| user_favorite_genres_random_user | BR3 | point | cassandra | 200 | 2.212 | 3.775 | 2.326 | 4.965 |
+| user_favorite_genres_random_user | BR3 | point | hive_parquet_sparksql | 20 | 241.505 | 270.467 | 234.266 | 275.904 |
+| adhoc_week_from_curated_events | ad hoc | scan | hive_parquet_sparksql | 20 | 484.899 | 522.16 | 484.34 | 538.768 |
+
+Cassandra 5.0 (1 node, RF=1, prepared statements, python cassandra-driver) vs Spark 3.5.3 SQL on Parquet Hive tables (`analytics.*`, local[*], one warm session, results collected to the driver); same container, same machine. Latency includes fetching every row. Cassandra: 200 runs (30 for scans), Hive: 20 runs, after warm-up.
+Cassandra concurrent throughput: 1,389 queries/s with 8 client threads (70% random-user point lookups, 30% top-10 lists, 10 s).
+`adhoc_week_from_curated_events` has no Cassandra table: it aggregates one week of `curated.watch_events` (partition pruning by watch_date).

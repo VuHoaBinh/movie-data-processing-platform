@@ -78,7 +78,7 @@ mô hình query-first: ghi nhiều hơn một chút để mỗi truy vấn đọ
 | Không có `LIKE`/tìm chuỗi con, không `JOIN`, `GROUP BY` hạn chế | BR1 tìm theo tiêu đề phải lọc ở ứng dụng; mọi tổng hợp phải tính trước | Spark tính trước, Cassandra chỉ phục vụ; (tuỳ chọn) SAI index của Cassandra 5 |
 | Mô hình theo truy vấn → thêm truy vấn mới = thêm bảng | Trùng lặp dữ liệu | Bảng dẫn xuất sinh từ cùng DataFrame trong `serving_frames()` |
 | Partition lớn (`bucket='all'` chứa ~20k dòng) | Nóng một partition nếu tải đọc rất lớn | Ở quy mô lớn chia bucket theo genre/tháng hoặc chỉ giữ top-K |
-| Làm mới batch = truncate + ghi lại | Cửa sổ ngắn bảng có thể rỗng khi đang nạp | Chấp nhận cho demo; production dùng bảng phiên bản hoá + đổi con trỏ |
+| Làm mới batch = truncate + insert (`write_cassandra`) | Trong lúc làm mới, dashboard có thể thấy bảng rỗng hoặc dở dang trong thời gian ngắn | Chấp nhận cho demo; production dùng bảng có phiên bản (ghi bảng mới rồi đổi con trỏ/alias) hoặc hoán đổi |
 | Quét toàn bộ (BR6 histogram) kém hơn Parquet | Chậm hơn khi đọc cả bảng | Benchmark trong `docs/evaluation.md`; có thể tính histogram trước |
 | Derby nhúng chỉ cho 1 tiến trình Spark tại một thời điểm | Không chạy hai job Hive đồng thời | Production dùng Hive Metastore Service + Postgres/MySQL |
 | Cassandra nhất quán cuối cùng (eventual) | Đọc ngay sau ghi có thể cũ | RF=1 trong demo; production RF=3 + `LOCAL_QUORUM` |

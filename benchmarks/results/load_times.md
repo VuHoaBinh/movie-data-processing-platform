@@ -1,0 +1,11 @@
+# Batch load times (1M watch rows)
+
+| stage | what | seconds |
+|---|---|---|
+| hive_raw | CSV -> raw Parquet tables (4) | 35.5 |
+| hive_curated | raw -> curated Parquet (cleaning, curated.watch_events partitioned by date) | 89.3 |
+| hive_analytics | curated -> 10 analytics Parquet tables | 88.3 |
+| cassandra_load | analytics -> 13 Cassandra serving tables (truncate + insert) | 36.5 |
+| total | sum of the stages above | 249.6 |
+
+Spark local[*], 4 GB driver, Docker Desktop; Cassandra writes go through spark-cassandra-connector 3.5.1.
