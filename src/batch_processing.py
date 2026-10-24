@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import argparse
 from decimal import ROUND_HALF_UP, Decimal
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
+
+from src.data_quality import Report, clean_pandas, format_report
 
 
 RAW_FILES = ("users.csv", "movies.csv", "ratings.csv", "watch_history.csv")
@@ -19,14 +22,16 @@ def read_raw(raw_dir: Path) -> tuple[pd.DataFrame, ...]:
     movies = pd.read_csv(raw_dir / "movies.csv")
     ratings = pd.read_csv(raw_dir / "ratings.csv")
     watches = pd.read_csv(raw_dir / "watch_history.csv")
-    ratings["timestamp"] = parse_timestamps(ratings["timestamp"])
-    watches["watch_timestamp"] = parse_timestamps(watches["watch_timestamp"])
+    for frame, column in ((ratings, "timestamp"), (watches, "watch_timestamp")):
+        parsed = parse_timestamps(frame[column])
+        frame["_bad_ts"] = frame[column].notna() & parsed.isna()  # text present but unparseable
+        frame[column] = parsed
     return users, movies, ratings, watches
 
 
 def parse_timestamps(values: pd.Series) -> pd.Series:
     """Parse mixed naive/ISO-with-offset strings; naive values are treated as UTC."""
-    return pd.to_datetime(values, format="mixed", utc=True).dt.tz_localize(None)
+    return pd.to_datetime(values, format="mixed", utc=True, errors="coerce").dt.tz_localize(None)
 
 
 def round_half_up(values: pd.Series, digits: int) -> pd.Series:
@@ -38,16 +43,24 @@ def round_half_up(values: pd.Series, digits: int) -> pd.Series:
     )
 
 
+def curate(
+    users: pd.DataFrame,
+    movies: pd.DataFrame,
+    ratings: pd.DataFrame,
+    watches: pd.DataFrame,
+    now: datetime | None = None,
+) -> tuple[tuple[pd.DataFrame, ...], Report]:
+    """Raw -> curated: apply the data-quality rules and return the clean frames plus rejected counts."""
+    return clean_pandas(users, movies, ratings, watches, now)
+
+
 def build_tables(
     users: pd.DataFrame,
     movies: pd.DataFrame,
     ratings: pd.DataFrame,
     watches: pd.DataFrame,
 ) -> dict[str, pd.DataFrame]:
-
-    watches = watches.drop_duplicates("watch_id").dropna()
-    ratings = ratings.drop_duplicates("rating_id").dropna()
-
+    """Build the dashboard tables from curated frames (see `curate`)."""
     joined = watches.merge(movies, on="movie_id", validate="many_to_one")
     joined = joined.merge(users, on="user_id", validate="many_to_one")
 
@@ -173,7 +186,9 @@ def build_tables(
 
 def run(raw_dir: Path, output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    tables = build_tables(*read_raw(raw_dir))
+    curated, report = curate(*read_raw(raw_dir))
+    print(format_report(report))
+    tables = build_tables(*curated)
     for name, table in tables.items():
         table.to_csv(output_dir / f"{name}.csv", index=False)
         print(f"Wrote {name}.csv ({len(table):,} rows)")

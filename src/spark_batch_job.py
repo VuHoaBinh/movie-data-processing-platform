@@ -4,10 +4,14 @@ import argparse
 import os
 import shutil
 import tempfile
+import time
+from datetime import datetime
 from pathlib import Path
 
 from pyspark.sql import DataFrame, SparkSession, functions as F, Window
 from pyspark.sql.types import DateType, IntegerType, StringType, StructField, StructType
+
+from src.data_quality import clean_spark, format_report, report_from_rows
 
 CASSANDRA_PACKAGE = "com.datastax.spark:spark-cassandra-connector_2.12:3.5.1"
 RAW_FILES = ("users.csv", "movies.csv", "ratings.csv", "watch_history.csv")
@@ -82,14 +86,20 @@ def read_raw(spark: SparkSession, raw_dir: Path) -> tuple[DataFrame, ...]:
 
 
 def curate(
-    users: DataFrame, movies: DataFrame, ratings: DataFrame, watches: DataFrame
-) -> tuple[DataFrame, DataFrame, DataFrame, DataFrame]:
-    """Raw -> curated: parse timestamps (UTC), drop duplicate ids and rows with missing values."""
+    users: DataFrame, movies: DataFrame, ratings: DataFrame, watches: DataFrame, now: datetime | None = None
+) -> tuple[tuple[DataFrame, ...], DataFrame]:
+    """Raw -> curated: parse timestamps (UTC) and apply the data-quality rules.
+
+    Returns the clean frames and a lazy (table_name, reason, rows) report of rejected rows.
+    """
+    # `_bad_ts` marks text that is present but cannot be parsed, so it is counted as invalid_timestamp.
+    ratings = ratings.withColumn("_bad_ts", F.col("timestamp").isNotNull() & F.to_timestamp("timestamp").isNull())
     ratings = ratings.withColumn("timestamp", F.to_timestamp("timestamp"))
+    watches = watches.withColumn(
+        "_bad_ts", F.col("watch_timestamp").isNotNull() & F.to_timestamp("watch_timestamp").isNull()
+    )
     watches = watches.withColumn("watch_timestamp", F.to_timestamp("watch_timestamp"))
-    watches = watches.dropDuplicates(["watch_id"]).dropna()
-    ratings = ratings.dropDuplicates(["rating_id"]).dropna()
-    return users, movies, ratings, watches
+    return clean_spark(users, movies, ratings, watches, now)
 
 
 def _write_csv_file(frame: DataFrame, output_dir: Path, name: str) -> None:
@@ -148,7 +158,11 @@ def build_tables(
         .withColumn("watch_hours", F.round(F.col("watch_minutes_raw") / 60, 1))
         .withColumn(
             "completion_rate",
-            F.round(F.least(F.lit(100.0), F.col("avg_watch_minutes") / F.col("duration") * 100), 1),
+            # least() skips nulls, so a never-watched movie would read 100%: keep it null instead.
+            F.when(
+                F.col("avg_watch_minutes").isNotNull(),
+                F.round(F.least(F.lit(100.0), F.col("avg_watch_minutes") / F.col("duration") * 100), 1),
+            ),
         )
         .drop("watch_minutes_raw", "avg_watch_minutes")
         .select(
@@ -190,11 +204,22 @@ def build_tables(
         .select("user_id", "subscription_plan", "region", "views", "watch_minutes", "active_days", "segment")
         .orderBy("user_id")
     )
-    segment_order = F.when(F.col("segment") == "Inactive", 0).when(F.col("segment") == "Casual", 1).otherwise(2)
+    # Every segment is always present (with 0 users when empty), like the Pandas categorical groupby.
+    segment_names = users.sparkSession.sql(
+        "SELECT * FROM VALUES ('Inactive', 0), ('Casual', 1), ('Active', 2) AS names(segment, segment_order)"
+    )
     user_segments = (
-        user_engagement.groupBy("segment")
-        .agg(F.count("user_id").alias("users"), F.sum("views").alias("views"))
-        .orderBy(segment_order)
+        segment_names.join(
+            user_engagement.groupBy("segment").agg(
+                F.count("user_id").alias("users"), F.sum("views").alias("views")
+            ),
+            "segment",
+            "left",
+        )
+        .withColumn("users", F.coalesce(F.col("users"), F.lit(0)))
+        .withColumn("views", F.coalesce(F.col("views"), F.lit(0)))
+        .orderBy("segment_order")
+        .select("segment", "users", "views")
     )
 
     genre_by_user = joined.groupBy("user_id", "genre").agg(F.count(F.lit(1)).alias("genre_views"))
@@ -308,28 +333,42 @@ def _save_hive(frame: DataFrame, table: str, partition_by: str | None = None) ->
     print(f"Hive table {table} written")
 
 
+def _timed(stage: str, started: float) -> float:
+    """Print the seconds since `started` as a parseable TIMING line and return a fresh start time."""
+    now = time.perf_counter()
+    print(f"TIMING {stage} {now - started:.1f}", flush=True)
+    return now
+
+
 def run(
     raw_dir: Path,
     warehouse_dir: Path | None = Path("data/warehouse"),
     cassandra_host: str | None = None,
     csv_output_dir: Path | None = None,
+    quality_report: bool = False,
 ) -> None:
     """raw CSV -> raw Parquet -> curated Parquet -> analytics tables -> Hive / Cassandra / optional CSV."""
     spark = create_spark(warehouse_dir, cassandra_host)
     try:
         raw = read_raw(spark, raw_dir)
+        clock = time.perf_counter()
         if warehouse_dir is not None:
             for database in ("raw", "curated", "analytics"):
                 spark.sql(f"CREATE DATABASE IF NOT EXISTS {database}")
             for name, frame in zip(RAW_SCHEMAS, raw):
                 _save_hive(frame, f"raw.{name}")
+            clock = _timed("hive_raw", clock)
             # The curated zone is rebuilt from the raw Parquet tables, not from the CSV files.
-            users, movies, ratings, watches = curate(*(spark.table(f"raw.{name}") for name in RAW_SCHEMAS))
+            (users, movies, ratings, watches), quality = curate(*(spark.table(f"raw.{name}") for name in RAW_SCHEMAS))
+            quality = quality.cache()
+            print(format_report(report_from_rows([tuple(row) for row in quality.collect()])))
+            _save_hive(quality, "curated.quality_report")
             watches = watches.withColumn("watch_date", F.to_date("watch_timestamp"))
             _save_hive(users, "curated.users")
             _save_hive(movies, "curated.movies")
             _save_hive(ratings, "curated.ratings")
             _save_hive(watches.repartition("watch_date"), "curated.watch_events", partition_by="watch_date")
+            clock = _timed("hive_curated", clock)
             curated = tuple(
                 spark.table(f"curated.{name}") for name in ("users", "movies", "ratings", "watch_events")
             )
@@ -337,10 +376,16 @@ def run(
             for name, table in tables.items():
                 _save_hive(table, f"analytics.{name}")
             tables = {name: spark.table(f"analytics.{name}") for name in tables}
+            clock = _timed("hive_analytics", clock)
         else:
-            tables = build_tables(*curate(*raw))
+            # Cache the curated frames: each output table would otherwise recompute them from the CSVs.
+            frames, quality = curate(*raw)
+            if quality_report:  # costs an extra pass over the raw data
+                print(format_report(report_from_rows([tuple(row) for row in quality.collect()])))
+            tables = build_tables(*(frame.persist() for frame in frames))
         if cassandra_host:
             write_cassandra(serving_frames(tables))
+            clock = _timed("cassandra_load", clock)
         if csv_output_dir is not None:
             for name, table in tables.items():
                 _write_csv_file(table, csv_output_dir, name)
@@ -361,8 +406,12 @@ def main() -> None:
         help="write the serving tables to Cassandra (default: $CASSANDRA_HOST; unset = skip)",
     )
     parser.add_argument("--csv-output-dir", type=Path, default=None, help="also write the 10 tables as CSV")
+    parser.add_argument(
+        "--quality-report", action="store_true",
+        help="print the rejected-row report even without Hive (always printed and saved with Hive)",
+    )
     args = parser.parse_args()
-    run(args.raw_dir, None if args.no_hive else args.warehouse_dir, args.cassandra_host, args.csv_output_dir)
+    run(args.raw_dir, None if args.no_hive else args.warehouse_dir, args.cassandra_host, args.csv_output_dir, args.quality_report)
 
 
 if __name__ == "__main__":
