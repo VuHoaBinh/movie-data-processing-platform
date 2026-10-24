@@ -75,6 +75,16 @@ Flink UI at `http://localhost:8081`; Cassandra is on `localhost:9042`.
 The compose setup is a single-machine demo: one Kafka broker/partition, one Flink TaskManager, one
 Cassandra node (RF=1).
 
+### Alternatives for comparison
+
+* **Spark Structured Streaming instead of Flink**: `docker compose --profile alt up -d spark-streaming`
+  computes the same 5-minute top-10 from `watch-events` into the Cassandra table `live_trending_spark`
+  (`src/spark_streaming_trending.py`). Flink keeps writing `live_trending`; both tables hold identical
+  rows for the windows both engines processed.
+* **Hive/Parquet instead of Cassandra for serving**: `src/dashboard_queries.py` holds every dashboard
+  query twice (CQL and Spark SQL over `analytics.*`); results are identical.
+  Set `TREND_WINDOW_SECONDS` to shorten the window for experiments (Flink job and Spark job).
+
 ## Run pieces locally
 
 Use Python 3.11-3.13. The dashboard needs Cassandra (`docker compose up -d cassandra cassandra-init`):
@@ -105,6 +115,8 @@ src/spark_batch_job.py       Spark batch: lake zones, dashboard tables, Cassandr
 src/batch_processing.py      Pandas twin of the batch pipeline (CSV output)
 src/cassandra_store.py       Cassandra connection / schema helper
 src/trending_materializer.py Kafka result -> Cassandra live_trending
+src/spark_streaming_trending.py Spark Structured Streaming alternative to Flink
+src/dashboard_queries.py     Dashboard queries as CQL and Spark SQL (storage comparison)
 src/kafka_event_producer.py  CSV-to-Kafka demo producer
 src/stream_processing.py     Offline stream replay utility
 flink/flink_trending_job.py  PyFlink event-time trending job

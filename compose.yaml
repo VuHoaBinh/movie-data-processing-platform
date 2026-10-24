@@ -156,6 +156,28 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  # Alternative stream engine (`docker compose --profile alt up spark-streaming`): same 5-minute
+  # top-10 as Flink, written to Cassandra table live_trending_spark for comparison.
+  spark-streaming:
+    profiles: ["alt"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: movie-analytics-app:latest
+    command: ["python", "-m", "src.spark_streaming_trending"]
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_WATCH_TOPIC: watch-events
+      CASSANDRA_HOST: cassandra
+      TREND_WINDOW_MINUTES: 5
+      TRENDING_TABLE: live_trending_spark
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      cassandra-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
   # One-shot Spark batch: raw CSV -> Hive/Parquet lake (data/warehouse) -> Cassandra serving tables.
   spark-batch:
     build:

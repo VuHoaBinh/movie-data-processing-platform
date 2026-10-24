@@ -82,6 +82,7 @@ def main() -> None:
     source_topic = os.getenv("KAFKA_WATCH_TOPIC", "watch-events")
     sink_topic = os.getenv("KAFKA_TREND_TOPIC", "trending-results")
     window_minutes = int(os.getenv("TREND_WINDOW_MINUTES", "5"))
+    window_seconds = int(os.getenv("TREND_WINDOW_SECONDS", str(window_minutes * 60)))
 
     env = StreamExecutionEnvironment.get_execution_environment()
     env.set_parallelism(1)
@@ -114,7 +115,7 @@ def main() -> None:
     window_results = (
         source.map(parse_watch_event, output_type=event_type)
         .key_by(lambda event: event[0], key_type=Types.STRING())
-        .window(TumblingEventTimeWindows.of(Time.minutes(window_minutes)))
+        .window(TumblingEventTimeWindows.of(Time.seconds(window_seconds)))
         .aggregate(
             MovieWindowAggregate(),
             AddWindowStart(),
