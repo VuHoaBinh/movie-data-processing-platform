@@ -71,6 +71,7 @@ Dữ liệu sinh vào thư mục tạm, users 50k, movies 20k, ratings = watches
 * Với dữ liệu ≤ 5M trên một máy, **Pandas nhanh hơn Spark 3-6 lần**; Spark mất ~50 s cố định (khởi động JVM, lập kế hoạch, shuffle).
 * Hệ số tăng khi dữ liệu tăng 50 lần: Pandas ×3,2 thời gian, ×11 RAM (≈0,45 GB/1M dòng watch ⇒ ~16M dòng là hết 8 GB); Spark ×1,9 thời gian, RAM bị chặn bởi heap 4 GB (spill ra đĩa) nên mở rộng được vượt RAM — nhưng chỉ đo tới 5M, nên "mở rộng ngang" là suy luận, không phải số đo.
 * Lần đo đầu (Spark tính lại dữ liệu đã làm sạch cho từng bảng đầu ra, chưa `persist`): 65 / 89 / 135 s (`batch_engines_spark_no_cache.md`); thêm `persist` còn 55 / 58 / 105 s.
+  Lần đo đầu đó ghi `outputs_identical = False` ở 100k: do bảng `user_segments` — với 100k lượt xem không ai vượt 35 lượt nên Spark chỉ trả 2 segment (thiếu "Active") còn Pandas trả 3; đã sửa bằng cách join với danh sách segment cố định, chạy lại 100k với code hiện tại cho `True`. Cột RAM của Spark trong file đó (109-138 MB) chỉ đo tiến trình Python bọc ngoài, không gồm JVM, nên **không so sánh** với `batch_engines.md`.
 
 Các giai đoạn của batch đầy đủ (1M dòng, `load_times.md`): CSV→raw Parquet 35,5 s; →curated 89,3 s; →10 bảng analytics 88,3 s; →Cassandra 36,5 s; tổng 249,6 s.
 
