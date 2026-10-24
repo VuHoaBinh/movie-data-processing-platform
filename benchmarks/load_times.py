@@ -23,7 +23,7 @@ STAGES = {
 
 
 def main() -> None:
-    env = dict(os.environ, SPARK_DRIVER_MEMORY="2g")
+    env = dict(os.environ, SPARK_DRIVER_MEMORY="1536m")
     completed = subprocess.run(
         [sys.executable, "-m", "src.spark_batch_job"], capture_output=True, text=True, env=env, check=True
     )
@@ -32,7 +32,7 @@ def main() -> None:
     rows.append({"stage": "total", "what": "sum of the stages above", "seconds": round(sum(float(r["seconds"]) for r in rows), 1)})
     write_results(
         "load_times", rows, "Batch load times (1M watch rows)",
-        ["Spark local[*], 2 GB driver (`SPARK_DRIVER_MEMORY`), Docker Desktop; Cassandra writes go through spark-cassandra-connector 3.5.1."],
+        ["Spark local[*], 1.5 GB driver (`SPARK_DRIVER_MEMORY`), Docker Desktop; Cassandra writes go through spark-cassandra-connector 3.5.1."],
     )
 
 

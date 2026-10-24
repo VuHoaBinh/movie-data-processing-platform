@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import math
+from itertools import islice
 import tempfile
 import time
 from pathlib import Path
@@ -81,7 +82,8 @@ def main() -> None:
     train_views = train["movie_id"].value_counts()
     held_out_titles = {movie for wanted in truth.values() for movie in wanted}
     unseen_titles = sum(1 for movie in held_out_titles if movie not in train_views.index)
-    cold_users = sum(1 for user in truth if user not in set(train["user_id"]))
+    train_users = set(train["user_id"])
+    cold_users = sum(1 for user in truth if user not in train_users)
     catalogue = len(movies)
 
     tables = batch_processing.build_tables(users, movies, train_ratings, train)
@@ -103,13 +105,22 @@ def main() -> None:
         watched_by.setdefault(user, set()).add(movie)
     for user in truth:
         owned = watched_by.get(user, ())
-        popular_lists[user] = [movie for movie in ranking if movie not in owned][:K]
+        popular_lists[user] = list(islice((movie for movie in ranking if movie not in owned), K))
     add("Popularity baseline", popular_lists, fit, time.perf_counter() - started)
 
     # Genre-based: recomputed from the same training data with the production function.
     started = time.perf_counter()
     genre_table = recommend_pandas(users, tables["movie_performance"], tables["user_preferences"], train)
     add("Genre-based (deployed)", grouped(genre_table), 0.0, time.perf_counter() - started)
+
+    # Sensitivity: the same candidates (two favourite genres, unwatched) ranked by training views instead of rating.
+    by_views = tables["movie_performance"].assign(
+        weighted_rating=lambda frame: frame["views"].astype("float64"),
+        rating_count=lambda frame: frame["views"].astype("float64"),
+    )
+    started = time.perf_counter()
+    views_table = recommend_pandas(users, by_views, tables["user_preferences"], train)
+    add("Genre-based, ranked by views (sensitivity)", grouped(views_table), 0.0, time.perf_counter() - started)
 
     # ALS: train on the same events, score with the same exclusion of watched titles.
     from src.spark_batch_job import create_spark
@@ -153,6 +164,9 @@ def main() -> None:
             "users_with_full_list = share of evaluated users that got ten titles from the method itself "
             "(ALS cannot serve users without training history; the dashboard then shows the genre-based list).",
             "**Candidates.** Every method excludes the titles the user watched before the cutoff, as the deployed tables do.",
+            "**Genre-based variants.** 'Genre-based (deployed)' ranks the unwatched titles of the user's two most-watched genres "
+            "by Bayesian rating, as `user_recommendations` does; the 'ranked by views' row keeps the candidates and changes only the "
+            "ranking key to training views (a sensitivity check, not deployed).",
             f"**ALS.** Implicit feedback, strength = number of watches of the title by the user; {params}, "
             f"{recommender_als.NUM_BLOCKS} user and item blocks. The 'deployed' setting was fixed before the evaluation; the "
             "other ALS rows only show sensitivity.",

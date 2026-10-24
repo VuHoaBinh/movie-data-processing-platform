@@ -63,13 +63,14 @@ def fixture_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
 def spark():
     """A local session per test module. `spark_batch_job.run` stops the active session when it finishes
     (test_parity calls it), so a session shared by the whole run would be dead for the modules after it;
-    `getOrCreate` hands every module a live one, and `_stop_spark` closes the last at the end."""
+    `getOrCreate` hands every module a live one, which is stopped when the module ends."""
     pytest.importorskip("pyspark")
     from src.spark_batch_job import create_spark
 
     session = create_spark(app_name="tests")
     session.conf.set("spark.sql.shuffle.partitions", "4")
-    return session
+    yield session
+    session.stop()  # no plain session may stay active: test_storage_equivalence needs one with Hive support
 
 
 @pytest.fixture(scope="session", autouse=True)

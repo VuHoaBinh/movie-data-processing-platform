@@ -91,9 +91,12 @@ def recommend_spark(
     watches: "DataFrame",
     size: int = RECOMMENDATION_SIZE,
 ) -> "DataFrame":
+    from pyspark import StorageLevel
     from pyspark.sql import Window, functions as F
 
-    seen = watches.select("user_id", "movie_id").distinct()
+    # Both frames feed several branches below; DISK_ONLY keeps them out of the (small) driver heap while
+    # computing the join and the window once instead of once per branch.
+    seen = watches.select("user_id", "movie_id").distinct().persist(StorageLevel.DISK_ONLY)
     per_genre_max = (
         seen.join(movie_performance.select("movie_id", "genre"), "movie_id")
         .groupBy("user_id", "genre").count().agg(F.max("count")).first()[0] or 0
@@ -117,6 +120,7 @@ def recommend_spark(
             F.lit("genre").alias("source"), F.lit(0).alias("_tier"),
             F.col("weighted_rating").alias("_k1"), F.col("rating_count").cast("double").alias("_k2"),
         )
+        .persist(StorageLevel.DISK_ONLY)
     )
 
     have = genre_rows.groupBy("user_id").agg(F.least(F.count(F.lit(1)), F.lit(size)).alias("have"))

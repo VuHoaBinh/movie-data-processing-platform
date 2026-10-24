@@ -59,7 +59,7 @@ def create_spark(
         .config("spark.sql.shuffle.partitions", "16")  # the default 200 is far too many for this data size
         # Takes effect when this process starts the JVM: the default 1 GB heap runs out while writing the
         # per-user recommendation tables (500k rows each) next to 20 parallel tasks.
-        .config("spark.driver.memory", os.getenv("SPARK_DRIVER_MEMORY", "2g"))
+        .config("spark.driver.memory", os.getenv("SPARK_DRIVER_MEMORY", "1536m"))
     )
     if warehouse_dir is not None:
         warehouse_dir = warehouse_dir.resolve()
@@ -439,6 +439,7 @@ def run(
         if cassandra_host:
             counts = write_cassandra({**serving_frames(tables), "quality_report": quality})
             clock = _timed("cassandra_load", clock, stages)
+            spark.catalog.clearCache()  # the 1.5 GB heap of the demo stack has no room for the cached tables any more
             record_batch_run(spark, counts, stages, started_at, datetime.now(timezone.utc))
         if csv_output_dir is not None:
             for name, table in tables.items():
