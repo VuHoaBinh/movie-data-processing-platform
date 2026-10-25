@@ -278,6 +278,34 @@ def user_segment_tables(users: DataFrame, user_engagement: DataFrame) -> tuple[D
     return thresholds, engagement, user_segments, segment_agreement
 
 
+def window_activity(joined: DataFrame) -> DataFrame:
+    """Alert inputs (Spark twin of `batch_processing.window_activity`)."""
+    days = joined.select("user_id", "movie_id", F.to_date("watch_timestamp").alias("day"))
+    reference = days.agg(F.max("day").alias("reference_date"))
+    width = rules.ACTIVITY_WINDOW_DAYS
+    return (
+        days.crossJoin(reference)
+        .withColumn("age", F.datediff("reference_date", "day"))
+        .withColumn(
+            "period",
+            F.when(F.col("age") < width, rules.RECENT).when(F.col("age") < 2 * width, rules.PREVIOUS),
+        )
+        .where(F.col("period").isNotNull())
+        .groupBy("period", "reference_date")
+        .agg(
+            F.count(F.lit(1)).alias("views"),
+            F.countDistinct("user_id").alias("active_users"),
+            F.countDistinct("movie_id").alias("active_titles"),
+        )
+        .withColumn(
+            "end_date", F.when(F.col("period") == rules.RECENT, F.col("reference_date")).otherwise(F.date_sub("reference_date", width))
+        )
+        .withColumn("start_date", F.date_sub("end_date", width - 1))
+        .select("period", "start_date", "end_date", "views", "active_users", "active_titles")
+        .orderBy("period")
+    )
+
+
 def view_trends(movies: DataFrame, joined: DataFrame) -> tuple[DataFrame, DataFrame, DataFrame]:
     """BR10 (Spark twin of `batch_processing.view_trends`)."""
     watched = joined.select("watch_id", "movie_id", "genre", F.to_date("watch_timestamp").alias("day"))
@@ -425,6 +453,7 @@ def build_tables(
         F.count("watch_id").alias("views")
     ).orderBy("hour")
     genre_daily_views, movie_daily_views, weekday_weekend_views = view_trends(movies, joined)
+    activity_windows = window_activity(joined)
     summary_metrics = spark_create_summary(users, movies, watches, ratings)
 
     return {
@@ -445,6 +474,7 @@ def build_tables(
         "genre_daily_views": genre_daily_views,
         "movie_daily_views": movie_daily_views,
         "weekday_weekend_views": weekday_weekend_views,
+        "activity_windows": activity_windows,
         "hourly_views": hourly_views,
         "summary_metrics": summary_metrics,
     }
@@ -509,6 +539,9 @@ def serving_frames(tables: dict[str, DataFrame]) -> dict[str, DataFrame]:
         "movie_daily_views": tables["movie_daily_views"],
         "weekday_weekend_views": tables["weekday_weekend_views"].select(
             bucket, "genre", "day_type", "days", "views", "avg_daily_views"
+        ),
+        "activity_windows": tables["activity_windows"].select(
+            bucket, "period", "start_date", "end_date", "views", "active_users", "active_titles"
         ),
         "summary_metrics": tables["summary_metrics"].select(
             bucket, "users", "movies", "views", "ratings", "average_rating"

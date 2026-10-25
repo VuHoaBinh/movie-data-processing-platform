@@ -95,6 +95,8 @@ EXPECTED = {
         ("All genres", "Weekday", 2, 5, 2.5), ("All genres", "Weekend", 2, 45, 22.5),
         ("Drama", "Weekday", 2, 1, 0.5), ("Drama", "Weekend", 2, 11, 5.5),
     ],
+    # ref 2026-01-04: the recent 28-day window (2025-12-08..2026-01-04) holds all 50 views, 3 users, 3 titles; no previous window
+    "activity_windows": [("recent", "2025-12-08", "2026-01-04", 50, 3, 3)],
     "hourly_views": [(5, 1), (8, 32), (9, 9), (10, 3), (11, 2), (12, 1), (22, 1), (23, 1)],
     "summary_metrics": [(4, 4, 50, 6, 3.83)],
 }
@@ -113,7 +115,7 @@ def test_table_matches_hand_computed_values(tables, name):
 
 
 def test_all_tables_are_covered(tables):
-    assert set(tables) == set(EXPECTED) and len(EXPECTED) == 19
+    assert set(tables) == set(EXPECTED) and len(EXPECTED) == 20
 
 
 def test_ratings_in_range_and_bayesian_between_mean_and_raw(tables):

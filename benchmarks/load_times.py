@@ -17,8 +17,8 @@ STAGES = {
     "hive_curated": "raw -> curated Parquet (cleaning, curated.watch_events partitioned by date)",
     "build_tables": "analytics plan: eager scalars (global rating statistics, recommendation candidate bounds)",
     "als": "BR3 alternative: ALS training and scoring (Spark MLlib, 1M watch events)",
-    "hive_analytics": "curated -> 20 analytics Parquet tables (19 shared with Pandas + ALS)",
-    "cassandra_load": "analytics + quality report -> 25 Cassandra tables (24 serving + quality report; truncate + insert) + run metadata",
+    "hive_analytics": "curated -> 21 analytics Parquet tables (20 shared with Pandas + ALS)",
+    "cassandra_load": "analytics + quality report -> 26 Cassandra tables (25 serving + quality report; truncate + insert) + run metadata",
 }
 
 

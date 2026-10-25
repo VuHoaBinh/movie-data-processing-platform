@@ -28,7 +28,7 @@ Dùng **hai lớp lưu trữ bổ trợ nhau**:
    - `raw.*`: bản sao Parquet của CSV, schema tường minh, chưa làm sạch.
    - `curated.*`: dữ liệu đã chuẩn hoá (timestamp UTC, bỏ trùng/thiếu); `curated.watch_events`
      **phân vùng theo `watch_date`**.
-   - `analytics.*`: 19 bảng tổng hợp của dashboard dùng chung với Pandas (kể cả `user_recommendations`) và, nếu batch chạy ALS, `user_recommendations_als`; nguồn để nạp vào Cassandra (24 bảng phục vụ sau khi tách theo truy vấn, cộng `quality_report`, `batch_table_rows`, `batch_runs`).
+   - `analytics.*`: 20 bảng tổng hợp của dashboard dùng chung với Pandas (kể cả `user_recommendations`) và, nếu batch chạy ALS, `user_recommendations_als`; nguồn để nạp vào Cassandra (25 bảng phục vụ sau khi tách theo truy vấn, cộng `quality_report`, `batch_table_rows`, `batch_runs`).
 
 Luồng: `CSV → raw → curated → analytics → Cassandra`. Spark luôn tính lại từ lớp lake; Cassandra
 chỉ là bản "phục vụ" có thể dựng lại bất cứ lúc nào.
@@ -56,6 +56,7 @@ chỉ là bản "phục vụ" có thể dựng lại bất cứ lúc nào.
 | BR6 Engagement | `user_engagement`, `subscription_views`, `hourly_views` | một lần quét `user_engagement` lấy `views`, `watch_minutes`, `active_days` (cùng lượt đọc); đọc bảng nhỏ |
 | BR7 Performance | `top_viewed_movies` | `WHERE bucket='all' LIMIT ceil(30% × movies)` |
 | BR8 Low engagement | `low_engagement_movies` PK `((bucket), priority, views, movie_id)`; `low_engagement_by_genre` PK `((genre), priority, views, movie_id)` (cùng dòng, đọc theo thể loại); `genre_engagement_peers` (8 dòng); `lowest_viewed_movies` (đối chứng) | `WHERE bucket='all' LIMIT 10`; `WHERE genre = ? LIMIT 20`; đọc 8 dòng |
+| BR8 / BR9 Cảnh báo Manager | `activity_windows` PK `((bucket), period)` (2 dòng: 28 ngày gần nhất và 28 ngày trước đó) | `WHERE bucket='all'` |
 | BR9 Segment | `user_segments`, `segment_thresholds` PK `((bucket), percentile)`, `segment_agreement` PK `((bucket), activity_profile, segment)` | đọc 3 dòng; `WHERE bucket='all'` (2 và 9 dòng) |
 | BR10 Xu hướng | `daily_views` PK `((bucket), day)`; `genre_daily_views` PK `((bucket), day, genre)` (1.440 dòng); `movie_daily_views` PK `((movie_id), day)`; `weekday_weekend_views` PK `((bucket), genre, day_type)` | `WHERE bucket='all'`; `WHERE movie_id = ?` |
 | Tổng quan | `summary_metrics` | `WHERE bucket='all'` |

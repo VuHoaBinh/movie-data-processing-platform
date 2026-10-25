@@ -130,10 +130,10 @@ docker compose --profile tools run --rm --no-deps -e RUN_HIVE_TESTS=1 benchmark 
 ```
 
 * `tests/test_fixture_tables.py` - a hand-made 4-user / 4-movie / 50-view dataset with the expected value of
-  every cell of the 19 tables derived by hand, run against both engines. `tests/test_fixture_peer_tables.py` adds a
+  every cell of the 20 tables derived by hand, run against both engines. `tests/test_fixture_peer_tables.py` adds a
   second hand-made dataset (13 Comedy + 2 Drama titles over 3 weeks) for the growth windows, genre-peer thresholds and
   the 7-day moving average.
-* `tests/test_parity.py` - Pandas and Spark produce exactly the same 19 tables (and rejected-row counts) on the
+* `tests/test_parity.py` - Pandas and Spark produce exactly the same 20 tables (and rejected-row counts) on the
   fixture, the peer dataset and generated clean / dirty / sparse data. The ALS table is Spark only and is not part of the parity.
 * `tests/test_recommendations.py` - BR3: a second hand-derived dataset (genre ties, filler, cold start), no watched
   title in any list on generated data (both engines), and the ALS tests (ten ranks per user, no watched title,
@@ -146,10 +146,12 @@ docker compose --profile tools run --rm --no-deps -e RUN_HIVE_TESTS=1 benchmark 
   demonstrated; `--out-dir` also keeps experiments away from `data/`.
 * `tests/test_cassandra_counts.py`, `tests/test_storage_equivalence.py` - Cassandra row counts match the
   batch output and both stores answer every dashboard query identically.
+* `tests/test_alerts.py` - the Manager alerts fire on degraded data (users and titles that stop watching, a genre that loses a
+  third of its views) and stay quiet on healthy data; each alert compares two time windows of an absolute count.
 * `tests/test_schema_migration.py` - an old Cassandra volume (the PR #2 `low_engagement_movies`) is upgraded by `cassandra-init`.
 * `tests/test_app_pages.py` - Streamlit `AppTest` renders the four pages on the loaded stack without errors; the user and
   title pickers (a search box that narrows to at most 50 matches, never the 50,000 users or 20,000 titles) stay capped.
-  The Manager alert limits are named constants in `src/business_rules.py` (`INACTIVE_SHARE_LIMIT`, `FLAGGED_SHARE_LIMIT`,
+  The Manager alert limits are named constants in `src/business_rules.py` (`ACTIVE_USERS_DROP_ALERT`, `ACTIVE_TITLES_DROP_ALERT`,
   `GENRE_DROP_ALERT`), justified in `docs/business_requirements.md` section 2.3.
 * `python -m src.profile_data` profiles the raw CSVs (`benchmarks/results/data_profile.md` / `.csv`, tested in
   `tests/test_profile_data.py`); `python -m src.data_quality` reports rejected rows on them.
