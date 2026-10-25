@@ -53,12 +53,18 @@ services:
       retries: 30
       start_period: 40s
 
+  # Applies sql/cassandra_schema.cql and rebuilds serving tables whose definition changed since the volume was
+  # created (src/cassandra_store.py: apply_schema); live_trending* and batch_runs are never dropped.
   cassandra-init:
-    image: cassandra:5.0
-    entrypoint: ["/bin/sh", "-c"]
-    command: ["cqlsh cassandra -f /sql/cassandra_schema.cql"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: movie-analytics-app:latest
+    command: ["python", "-m", "src.cassandra_store", "init"]
     volumes:
-      - ./sql:/sql:ro
+      - ./sql:/app/sql:ro
+    environment:
+      CASSANDRA_HOST: cassandra
     depends_on:
       cassandra:
         condition: service_healthy
@@ -194,6 +200,7 @@ services:
       - ./tests:/app/tests
       - ./benchmarks:/app/benchmarks
       - ./sql:/app/sql
+      - ./app.py:/app/app.py
       - ./generate_data.py:/app/generate_data.py
       - ./pytest.ini:/app/pytest.ini
     environment:
