@@ -11,6 +11,7 @@ from pathlib import Path
 from pyspark.sql import DataFrame, SparkSession, functions as F, Window
 from pyspark.sql.types import DateType, IntegerType, StringType, StructField, StructType
 
+from src import business_rules as rules
 from src.data_quality import clean_spark, format_report, report_from_rows
 from src.recommendations import recommend_spark
 from src.recommender_als import build_als_table
@@ -128,6 +129,194 @@ def _write_csv_file(frame: DataFrame, output_dir: Path, name: str) -> None:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
+def nearest_rank(frame: DataFrame, group: str | None, column: str, percent: int, alias: str) -> DataFrame:
+    """Per-group percentile without interpolation: the ceil(percent * n / 100)-th smallest non-null value.
+
+    Same definition as `business_rules.nearest_rank_position` (integer arithmetic), so it matches the
+    Pandas twin exactly. Without a group the whole frame is one group.
+    """
+    key = group or "_all"
+    values = frame.where(F.col(column).isNotNull())
+    if group is None:
+        values = values.withColumn(key, F.lit(1))
+    ranked = (
+        values.select(key, column)
+        .withColumn("_position", F.row_number().over(Window.partitionBy(key).orderBy(column)))
+        .withColumn("_count", F.count(F.lit(1)).over(Window.partitionBy(key)))
+        .where(F.col("_position") == F.expr(f"greatest(div(_count * {percent} + 99, 100), 1)"))
+    )
+    return ranked.select(*([group] if group else []), F.col(column).alias(alias))
+
+
+def growth_trending(movies: DataFrame, joined: DataFrame) -> DataFrame:
+    """BR2 "rising now" (Spark twin of `batch_processing.growth_trending`)."""
+    days = joined.select("movie_id", F.to_date("watch_timestamp").alias("day"))
+    reference = days.agg(F.max("day").alias("reference_date"))
+    window = rules.TREND_WINDOW_DAYS
+    counts = (
+        days.crossJoin(reference)
+        .withColumn("age", F.datediff("reference_date", "day"))
+        .groupBy("movie_id")
+        .agg(
+            F.count(F.when(F.col("age") < window, 1)).alias("views_recent"),
+            F.count(F.when((F.col("age") >= window) & (F.col("age") < 2 * window), 1)).alias("views_previous"),
+        )
+        .where(F.col("views_recent") >= rules.TREND_MIN_RECENT_VIEWS)
+    )
+    return (
+        movies.select("movie_id", "title", "genre")
+        .join(counts, "movie_id")
+        .crossJoin(reference)
+        .withColumn(
+            "growth",
+            F.round((F.col("views_recent") - F.col("views_previous")) / (F.col("views_previous") + rules.TREND_DAMPING), 3),
+        )
+        .select("movie_id", "title", "genre", "views_recent", "views_previous", "growth", "reference_date")
+        .orderBy(F.desc("growth"), F.asc("movie_id"))
+    )
+
+
+def peer_low_engagement(movie_performance: DataFrame) -> tuple[DataFrame, DataFrame]:
+    """BR8 (Spark twin of `batch_processing.peer_low_engagement`): (per-genre peers, flagged movies)."""
+    reliable = movie_performance.where(F.col("views") >= rules.PEER_MIN_VIEWS_FOR_COMPLETION)
+    peers = (
+        movie_performance.groupBy("genre").agg(F.count(F.lit(1)).alias("movies"))
+        .join(nearest_rank(movie_performance, "genre", "views", rules.PEER_VIEWS_PERCENTILE, "views_p10"), "genre")
+        .join(
+            nearest_rank(reliable, "genre", "completion_rate", rules.PEER_COMPLETION_PERCENTILE, "completion_p10"),
+            "genre", "left",
+        )
+    )
+    scored = movie_performance.join(peers, "genre")
+    low_views = F.col("views") <= F.col("views_p10")
+    low_completion = (F.col("views") >= rules.PEER_MIN_VIEWS_FOR_COMPLETION) & (
+        F.col("completion_rate") <= F.col("completion_p10")
+    )
+    scored = scored.withColumn(
+        "reason",
+        F.when(low_views & low_completion, rules.REASON_BOTH)
+        .when(low_views, rules.REASON_LOW_VIEWS)
+        .when(low_completion, rules.REASON_LOW_COMPLETION),  # null = not flagged
+    ).cache()
+    priority = F.create_map(*[item for reason, value in rules.REASON_PRIORITY.items() for item in (F.lit(reason), F.lit(value))])
+    flagged = (
+        scored.where(F.col("reason").isNotNull())
+        .withColumn("priority", priority[F.col("reason")])
+        .select(
+            "movie_id", "title", "genre", "views", "completion_rate",
+            F.col("views_p10").alias("genre_views_p10"),
+            F.col("completion_p10").alias("genre_completion_p10"),
+            "reason", "priority",
+        )
+        .orderBy("priority", "views", "movie_id")
+    )
+    counts = scored.groupBy("genre").agg(
+        F.count(F.when(F.col("reason") == rules.REASON_LOW_VIEWS, 1)).alias("low_views_count"),
+        F.count(F.when(F.col("reason") == rules.REASON_LOW_COMPLETION, 1)).alias("low_completion_count"),
+        F.count(F.when(F.col("reason") == rules.REASON_BOTH, 1)).alias("low_both"),
+    )
+    peers = (
+        peers.join(counts, "genre")
+        .withColumnRenamed("low_views_count", "low_views")
+        .withColumnRenamed("low_completion_count", "low_completion")
+        .withColumn("flagged", F.col("low_views") + F.col("low_completion") + F.col("low_both"))
+        .select(
+            "genre", "movies", "views_p10", "completion_p10", "low_views", "low_completion", "low_both", "flagged"
+        )
+        .orderBy("genre")
+    )
+    return peers, flagged
+
+
+def user_segment_tables(users: DataFrame, user_engagement: DataFrame) -> tuple[DataFrame, DataFrame, DataFrame, DataFrame]:
+    """BR9: quantile thresholds, the engagement table with segments, segment totals, agreement matrix."""
+    spark = users.sparkSession
+    user_engagement = user_engagement.persist()  # read by the threshold, segment and agreement queries
+    percentiles = (rules.SEGMENT_LOW_PERCENTILE, rules.SEGMENT_HIGH_PERCENTILE)
+    population = user_engagement.count()
+    cuts = [
+        nearest_rank(user_engagement, None, "views", percent, "views_threshold").first()[0] for percent in percentiles
+    ]
+    low_cut, high_cut = (0 if cut is None else int(cut) for cut in cuts)  # no users -> nothing to segment
+    thresholds = spark.createDataFrame(
+        [(percent, cut, population) for percent, cut in zip(percentiles, (low_cut, high_cut))],
+        "percentile int, views_threshold bigint, users bigint",
+    )
+    engagement = user_engagement.withColumn(
+        "segment",
+        F.when(F.col("views") > high_cut, "Active").when(F.col("views") > low_cut, "Casual").otherwise("Inactive"),
+    )
+    # Every segment is always present (with 0 users when empty), like the Pandas categorical groupby.
+    segment_names = spark.createDataFrame(list(enumerate(rules.SEGMENTS)), "segment_order int, segment string")
+    user_segments = (
+        segment_names.join(
+            engagement.groupBy("segment").agg(F.count("user_id").alias("users"), F.sum("views").alias("views")),
+            "segment",
+            "left",
+        )
+        .withColumn("users", F.coalesce(F.col("users"), F.lit(0)))
+        .withColumn("views", F.coalesce(F.col("views"), F.lit(0)))
+        .orderBy("segment_order")
+        .select("segment", "users", "views")
+    )
+    # Confusion matrix of the batch segment against the generator's `activity_profile` label (all 9 cells).
+    profiles = spark.createDataFrame(list(enumerate(rules.SEGMENTS)), "profile_order int, activity_profile string")
+    segments = spark.createDataFrame(list(enumerate(rules.SEGMENTS)), "segment_order int, segment string")
+    matches = (
+        users.select("user_id", "activity_profile")
+        .join(engagement.select("user_id", "segment"), "user_id")
+        .groupBy("activity_profile", "segment")
+        .agg(F.count(F.lit(1)).alias("users"))
+    )
+    segment_agreement = (
+        profiles.crossJoin(segments)
+        .join(matches, ["activity_profile", "segment"], "left")
+        .withColumn("users", F.coalesce(F.col("users"), F.lit(0)))
+        .orderBy("profile_order", "segment_order")
+        .select("activity_profile", "segment", "users")
+    )
+    return thresholds, engagement, user_segments, segment_agreement
+
+
+def view_trends(movies: DataFrame, joined: DataFrame) -> tuple[DataFrame, DataFrame, DataFrame]:
+    """BR10 (Spark twin of `batch_processing.view_trends`)."""
+    watched = joined.select("watch_id", "movie_id", "genre", F.to_date("watch_timestamp").alias("day")).persist()
+    span = watched.agg(F.min("day").alias("first_day"), F.max("day").alias("last_day"))
+    calendar = span.select(F.explode(F.expr("sequence(first_day, last_day, interval 1 day)")).alias("day"))
+    counts = watched.groupBy("genre", "day").agg(F.count(F.lit(1)).alias("views"))
+    grid = movies.select("genre").distinct().crossJoin(calendar)
+    genre_daily = (
+        grid.join(counts, ["genre", "day"], "left")
+        .withColumn("views", F.coalesce(F.col("views"), F.lit(0)))
+    )
+    window = rules.MOVING_AVERAGE_DAYS
+    trailing = Window.partitionBy("genre").orderBy("day").rowsBetween(-(window - 1), 0)
+    genre_daily = genre_daily.withColumn(
+        "views_ma7",
+        F.when(F.count(F.lit(1)).over(trailing) == window, F.round(F.sum("views").over(trailing) / window, 2)),
+    )
+    genre_daily_views = genre_daily.select("day", "genre", "views", "views_ma7").orderBy("day", "genre")
+
+    movie_daily_views = (
+        watched.groupBy("movie_id", "day").agg(F.count("watch_id").alias("views")).orderBy("movie_id", "day")
+    )
+
+    all_genres = genre_daily.groupBy("day").agg(F.sum("views").alias("views")).withColumn("genre", F.lit(rules.ALL_GENRES))
+    daily = genre_daily.select("genre", "day", "views").unionByName(all_genres.select("genre", "day", "views"))
+    # dayofweek: 1 = Sunday ... 7 = Saturday
+    weekday_weekend_views = (
+        daily.withColumn(
+            "day_type", F.when(F.dayofweek("day").isin(1, 7), rules.WEEKEND).otherwise(rules.WEEKDAY)
+        )
+        .groupBy("genre", "day_type")
+        .agg(F.count(F.lit(1)).alias("days"), F.sum("views").alias("views"))
+        .withColumn("avg_daily_views", F.round(F.col("views") / F.col("days"), 1))
+        .select("genre", "day_type", "days", "views", "avg_daily_views")
+        .orderBy("genre", "day_type")
+    )
+    return genre_daily_views, movie_daily_views, weekday_weekend_views
+
+
 def build_tables(
     users: DataFrame, movies: DataFrame, ratings: DataFrame, watches: DataFrame
 ) -> dict[str, DataFrame]:
@@ -182,9 +371,11 @@ def build_tables(
         )
         .orderBy("movie_id")
     )
-    low_engagement_movies = movie_performance.select(
+    lowest_viewed_movies = movie_performance.select(
         "movie_id", "title", "genre", "views", "completion_rate"
     ).orderBy(F.asc("views"), F.asc("title"))
+    genre_engagement_peers, low_engagement_movies = peer_low_engagement(movie_performance)
+    trending_growth = growth_trending(movies, joined)
 
     # Spark groupBy output is unordered; every table below is sorted like the Pandas pipeline.
     genre_popularity = joined.groupBy("genre").agg(
@@ -205,32 +396,12 @@ def build_tables(
         .withColumn("views", F.coalesce(F.col("views"), F.lit(0)))
         .withColumn("watch_minutes", F.coalesce(F.col("watch_minutes"), F.lit(0)))
         .withColumn("active_days", F.coalesce(F.col("active_days"), F.lit(0)))
-        .withColumn(
-            "segment",
-            F.when(F.col("views") <= 10, "Inactive")
-            .when(F.col("views") <= 35, "Casual")
-            .otherwise("Active"),
-        )
-        .select("user_id", "subscription_plan", "region", "views", "watch_minutes", "active_days", "segment")
-        .orderBy("user_id")
+        .select("user_id", "subscription_plan", "region", "views", "watch_minutes", "active_days")
     )
-    # Every segment is always present (with 0 users when empty), like the Pandas categorical groupby.
-    segment_names = users.sparkSession.sql(
-        "SELECT * FROM VALUES ('Inactive', 0), ('Casual', 1), ('Active', 2) AS names(segment, segment_order)"
-    )
-    user_segments = (
-        segment_names.join(
-            user_engagement.groupBy("segment").agg(
-                F.count("user_id").alias("users"), F.sum("views").alias("views")
-            ),
-            "segment",
-            "left",
-        )
-        .withColumn("users", F.coalesce(F.col("users"), F.lit(0)))
-        .withColumn("views", F.coalesce(F.col("views"), F.lit(0)))
-        .orderBy("segment_order")
-        .select("segment", "users", "views")
-    )
+    segment_thresholds, user_engagement, user_segments, segment_agreement = user_segment_tables(users, user_engagement)
+    user_engagement = user_engagement.select(
+        "user_id", "subscription_plan", "region", "views", "watch_minutes", "active_days", "segment"
+    ).orderBy("user_id")
 
     genre_by_user = joined.groupBy("user_id", "genre").agg(F.count(F.lit(1)).alias("genre_views"))
     preference_window = Window.partitionBy("user_id").orderBy(F.desc("genre_views"), F.asc("genre"))
@@ -253,18 +424,27 @@ def build_tables(
     hourly_views = joined.groupBy(F.hour("watch_timestamp").alias("hour")).agg(
         F.count("watch_id").alias("views")
     ).orderBy("hour")
+    genre_daily_views, movie_daily_views, weekday_weekend_views = view_trends(movies, joined)
     summary_metrics = spark_create_summary(users, movies, watches, ratings)
 
     return {
         "movie_performance": movie_performance,
+        "trending_growth": trending_growth,
         "low_engagement_movies": low_engagement_movies,
+        "lowest_viewed_movies": lowest_viewed_movies,
+        "genre_engagement_peers": genre_engagement_peers,
         "genre_popularity": genre_popularity,
         "subscription_views": subscription_views,
         "user_engagement": user_engagement,
         "user_segments": user_segments,
+        "segment_thresholds": segment_thresholds,
+        "segment_agreement": segment_agreement,
         "user_preferences": user_preferences,
         "user_recommendations": user_recommendations,
         "daily_views": daily_views,
+        "genre_daily_views": genre_daily_views,
+        "movie_daily_views": movie_daily_views,
+        "weekday_weekend_views": weekday_weekend_views,
         "hourly_views": hourly_views,
         "summary_metrics": summary_metrics,
     }
@@ -286,6 +466,7 @@ def serving_frames(tables: dict[str, DataFrame]) -> dict[str, DataFrame]:
     performance = tables["movie_performance"]
     bucket = F.lit(BATCH_BUCKET).alias("bucket")
     rated = performance.where(F.col("weighted_rating").isNotNull())
+    low_engagement = tables["low_engagement_movies"]
     return {
         "movie_performance": performance,
         "movies_by_genre_rating": rated.select(
@@ -298,7 +479,19 @@ def serving_frames(tables: dict[str, DataFrame]) -> dict[str, DataFrame]:
             bucket, "views", "movie_id", "title", "genre", "unique_viewers", "avg_rating",
             "completion_rate", "watch_hours",
         ),
-        "low_engagement_movies": tables["low_engagement_movies"].select(
+        "trending_growth": tables["trending_growth"].select(
+            bucket, "growth", "movie_id", "title", "genre", "views_recent", "views_previous", "reference_date"
+        ),
+        "low_engagement_movies": low_engagement.select(
+            bucket, "priority", "views", "movie_id", "title", "genre", "completion_rate",
+            "genre_views_p10", "genre_completion_p10", "reason",
+        ),
+        "low_engagement_by_genre": low_engagement.select(
+            "genre", "priority", "views", "movie_id", "title", "completion_rate",
+            "genre_views_p10", "genre_completion_p10", "reason",
+        ),
+        "genre_engagement_peers": tables["genre_engagement_peers"],
+        "lowest_viewed_movies": tables["lowest_viewed_movies"].select(
             bucket, "views", "title", "movie_id", "genre", "completion_rate"
         ),
         "genre_popularity": tables["genre_popularity"],
@@ -306,10 +499,17 @@ def serving_frames(tables: dict[str, DataFrame]) -> dict[str, DataFrame]:
         "user_engagement": tables["user_engagement"],
         "hourly_views": tables["hourly_views"],
         "user_segments": tables["user_segments"],
+        "segment_thresholds": tables["segment_thresholds"].select(bucket, "percentile", "views_threshold", "users"),
+        "segment_agreement": tables["segment_agreement"].select(bucket, "activity_profile", "segment", "users"),
         "user_preferences": tables["user_preferences"],
         "user_recommendations": tables["user_recommendations"],
         **({"user_recommendations_als": tables["user_recommendations_als"]} if "user_recommendations_als" in tables else {}),
         "daily_views": tables["daily_views"].select(bucket, "day", "views", "unique_viewers"),
+        "genre_daily_views": tables["genre_daily_views"].select(bucket, "day", "genre", "views", "views_ma7"),
+        "movie_daily_views": tables["movie_daily_views"],
+        "weekday_weekend_views": tables["weekday_weekend_views"].select(
+            bucket, "genre", "day_type", "days", "views", "avg_daily_views"
+        ),
         "summary_metrics": tables["summary_metrics"].select(
             bucket, "users", "movies", "views", "ratings", "average_rating"
         ),

@@ -62,8 +62,64 @@ CREATE TABLE IF NOT EXISTS top_viewed_movies (
   PRIMARY KEY ((bucket), views, movie_id)
 ) WITH CLUSTERING ORDER BY (views DESC, movie_id ASC);
 
--- BR8: lowest-viewed titles first (ties by title).
+-- BR2 "rising now" (batch): growth of the last 7 days over the 7 days before, best first
+-- (`SELECT ... WHERE bucket = 'all' LIMIT 10`). Only movies with >= 10 recent views are stored.
+CREATE TABLE IF NOT EXISTS trending_growth (
+  bucket text,
+  growth double,
+  movie_id text,
+  title text,
+  genre text,
+  views_recent bigint,
+  views_previous bigint,
+  reference_date date,
+  PRIMARY KEY ((bucket), growth, movie_id)
+) WITH CLUSTERING ORDER BY (growth DESC, movie_id ASC);
+
+-- BR8: titles that are low relative to their genre peers, worst first: priority 1 = both, 2 = low_views,
+-- 3 = low_completion, then fewest views. One partition for the global list ...
 CREATE TABLE IF NOT EXISTS low_engagement_movies (
+  bucket text,
+  priority int,
+  views bigint,
+  movie_id text,
+  title text,
+  genre text,
+  completion_rate double,
+  genre_views_p10 bigint,
+  genre_completion_p10 double,
+  reason text,
+  PRIMARY KEY ((bucket), priority, views, movie_id)
+) WITH CLUSTERING ORDER BY (priority ASC, views ASC, movie_id ASC);
+
+-- ... and the same rows with one partition per genre for the genre drill-down.
+CREATE TABLE IF NOT EXISTS low_engagement_by_genre (
+  genre text,
+  priority int,
+  views bigint,
+  movie_id text,
+  title text,
+  completion_rate double,
+  genre_views_p10 bigint,
+  genre_completion_p10 double,
+  reason text,
+  PRIMARY KEY ((genre), priority, views, movie_id)
+) WITH CLUSTERING ORDER BY (priority ASC, views ASC, movie_id ASC);
+
+-- BR8: peer thresholds and flagged counts per genre (8 rows).
+CREATE TABLE IF NOT EXISTS genre_engagement_peers (
+  genre text PRIMARY KEY,
+  movies bigint,
+  views_p10 bigint,
+  completion_p10 double,
+  low_views bigint,
+  low_completion bigint,
+  low_both bigint,
+  flagged bigint
+);
+
+-- BR8 baseline: lowest-viewed titles regardless of genre (ties by title), kept for comparison.
+CREATE TABLE IF NOT EXISTS lowest_viewed_movies (
   bucket text,
   views bigint,
   title text,
@@ -109,6 +165,24 @@ CREATE TABLE IF NOT EXISTS user_segments (
   views bigint
 );
 
+-- BR9: the quantile thresholds behind the segments (percentile 25 -> Inactive up to, 75 -> Casual up to).
+CREATE TABLE IF NOT EXISTS segment_thresholds (
+  bucket text,
+  percentile int,
+  views_threshold bigint,
+  users bigint,
+  PRIMARY KEY ((bucket), percentile)
+) WITH CLUSTERING ORDER BY (percentile ASC);
+
+-- BR9: confusion matrix of the batch segment against the generator's activity_profile (9 rows).
+CREATE TABLE IF NOT EXISTS segment_agreement (
+  bucket text,
+  activity_profile text,
+  segment text,
+  users bigint,
+  PRIMARY KEY ((bucket), activity_profile, segment)
+);
+
 -- BR3: favourite genres of one user ('a|b').
 CREATE TABLE IF NOT EXISTS user_preferences (
   user_id text PRIMARY KEY,
@@ -152,6 +226,36 @@ CREATE TABLE IF NOT EXISTS daily_views (
   unique_viewers bigint,
   PRIMARY KEY ((bucket), day)
 ) WITH CLUSTERING ORDER BY (day ASC);
+
+-- BR10: daily views of every genre over the full calendar (one partition: 180 days x 8 genres), with the
+-- trailing 7-day average (null until 7 days of history exist). A genre filter is applied client-side.
+CREATE TABLE IF NOT EXISTS genre_daily_views (
+  bucket text,
+  day date,
+  genre text,
+  views bigint,
+  views_ma7 double,
+  PRIMARY KEY ((bucket), day, genre)
+) WITH CLUSTERING ORDER BY (day ASC, genre ASC);
+
+-- BR10: the daily series of one movie (only days with views), one partition per movie.
+CREATE TABLE IF NOT EXISTS movie_daily_views (
+  movie_id text,
+  day date,
+  views bigint,
+  PRIMARY KEY ((movie_id), day)
+) WITH CLUSTERING ORDER BY (day ASC);
+
+-- BR10: weekday vs weekend per genre and for 'All genres' (18 rows): calendar days, views, views per day.
+CREATE TABLE IF NOT EXISTS weekday_weekend_views (
+  bucket text,
+  genre text,
+  day_type text,
+  days bigint,
+  views bigint,
+  avg_daily_views double,
+  PRIMARY KEY ((bucket), genre, day_type)
+);
 
 CREATE TABLE IF NOT EXISTS summary_metrics (
   bucket text PRIMARY KEY,

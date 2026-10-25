@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -14,7 +15,7 @@ sys.path.insert(0, str(ROOT))
 USERS = """user_id,age,gender,region,registration_date,subscription_plan,activity_profile
 U1,30,Male,Vietnam,2025-01-01,Basic,Active
 U2,25,Female,Japan,2025-02-01,Premium,Casual
-U3,41,Other,Korea,2025-03-01,Standard,Casual
+U3,41,Other,Korea,2025-03-01,Standard,Active
 U4,19,Male,Thailand,2025-04-01,Basic,Inactive
 """
 MOVIES = """movie_id,title,genre,release_year,duration,content_type,language,maturity_rating
@@ -46,6 +47,90 @@ WATCHES = ["watch_id,user_id,movie_id,watch_timestamp,watch_duration,device"] + 
 ] + [f"WA{i:02},U1,M2,2026-01-04 08:00:00,10,Web" for i in range(32)] + [
     f"WB{i:02},U3,M3,2026-01-04 09:00:00,10,Mobile" for i in range(9)
 ]
+
+
+# Second hand-made dataset for the rules that need history and peers (BR2 growth windows, BR8 peer
+# thresholds, BR10 moving average). One viewer; latest watch date (reference date) = 2026-03-15.
+PEER_USERS = """user_id,age,gender,region,registration_date,subscription_plan,activity_profile
+P1,30,Male,Vietnam,2025-01-01,Basic,Active
+"""
+PEER_MOVIES = ["movie_id,title,genre,release_year,duration,content_type,language,maturity_rating"] + [
+    f"C{n:02},Comedy {n:02},Comedy,2020,100,Movie,English,P" for n in range(1, 14)
+] + ["D1,Drama 1,Drama,2020,100,Movie,English,P", "D2,Drama 2,Drama,2020,100,Movie,English,P"]
+PEER_RATINGS = """rating_id,user_id,movie_id,rating,timestamp
+R1,P1,C05,5,2026-03-01 12:00:00
+"""
+# movie -> (total views, minutes per view, views 03-09..03-15, views 03-02..03-08); the rest are older
+# (03-01 and before). Completion rate = minutes, because every duration is 100.
+PEER_VIEWS = {
+    "C02": (5, 40, 0, 0), "C03": (6, 20, 3, 3), "C04": (8, 80, 4, 4), "C05": (10, 70, 10, 0),
+    "C06": (12, 60, 9, 3), "C07": (25, 75, 10, 15), "C08": (20, 50, 0, 0), "C09": (25, 85, 12, 12),
+    "C10": (30, 65, 20, 10), "C11": (40, 95, 30, 10), "C12": (60, 55, 40, 0), "C13": (5, 90, 5, 0),
+}
+
+
+def peer_watch_rows() -> list[str]:
+    rows = ["watch_id,user_id,movie_id,watch_timestamp,watch_duration,device"]
+    for movie, (total, minutes, recent, previous) in PEER_VIEWS.items():
+        days = (
+            [f"2026-03-{9 + i % 7:02}" for i in range(recent)]
+            + [f"2026-03-{2 + i % 7:02}" for i in range(previous)]
+            + [(datetime(2026, 3, 1) - timedelta(days=i % 5)).strftime("%Y-%m-%d") for i in range(total - recent - previous)]
+        )
+        rows += [f"W_{movie}_{i:02},P1,{movie},{day} 12:00:00,{minutes},Web" for i, day in enumerate(days)]
+    return rows
+
+
+@pytest.fixture(scope="session")
+def peer_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    directory = tmp_path_factory.mktemp("peer")
+    (directory / "users.csv").write_text(PEER_USERS, encoding="utf-8")
+    (directory / "movies.csv").write_text("\n".join(PEER_MOVIES) + "\n", encoding="utf-8")
+    (directory / "ratings.csv").write_text(PEER_RATINGS, encoding="utf-8")
+    (directory / "watch_history.csv").write_text("\n".join(peer_watch_rows()) + "\n", encoding="utf-8")
+    return directory
+
+
+# Second hand-made dataset for the rules that need history and peers (BR2 growth windows, BR8 peer
+# thresholds, BR10 moving average). One viewer; latest watch date (reference date) = 2026-03-15.
+PEER_USERS = """user_id,age,gender,region,registration_date,subscription_plan,activity_profile
+P1,30,Male,Vietnam,2025-01-01,Basic,Active
+"""
+PEER_MOVIES = ["movie_id,title,genre,release_year,duration,content_type,language,maturity_rating"] + [
+    f"C{n:02},Comedy {n:02},Comedy,2020,100,Movie,English,P" for n in range(1, 14)
+] + ["D1,Drama 1,Drama,2020,100,Movie,English,P", "D2,Drama 2,Drama,2020,100,Movie,English,P"]
+PEER_RATINGS = """rating_id,user_id,movie_id,rating,timestamp
+R1,P1,C05,5,2026-03-01 12:00:00
+"""
+# movie -> (total views, minutes per view, views 03-09..03-15, views 03-02..03-08); the rest are older
+# (03-01 and before). Completion rate = minutes, because every duration is 100.
+PEER_VIEWS = {
+    "C02": (5, 40, 0, 0), "C03": (6, 20, 3, 3), "C04": (8, 80, 4, 4), "C05": (10, 70, 10, 0),
+    "C06": (12, 60, 9, 3), "C07": (25, 75, 10, 15), "C08": (20, 50, 0, 0), "C09": (25, 85, 12, 12),
+    "C10": (30, 65, 20, 10), "C11": (40, 95, 30, 10), "C12": (60, 55, 40, 0), "C13": (5, 90, 5, 0),
+}
+
+
+def peer_watch_rows() -> list[str]:
+    rows = ["watch_id,user_id,movie_id,watch_timestamp,watch_duration,device"]
+    for movie, (total, minutes, recent, previous) in PEER_VIEWS.items():
+        days = (
+            [f"2026-03-{9 + i % 7:02}" for i in range(recent)]
+            + [f"2026-03-{2 + i % 7:02}" for i in range(previous)]
+            + [(datetime(2026, 3, 1) - timedelta(days=i % 5)).strftime("%Y-%m-%d") for i in range(total - recent - previous)]
+        )
+        rows += [f"W_{movie}_{i:02},P1,{movie},{day} 12:00:00,{minutes},Web" for i, day in enumerate(days)]
+    return rows
+
+
+@pytest.fixture(scope="session")
+def peer_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    directory = tmp_path_factory.mktemp("peer")
+    (directory / "users.csv").write_text(PEER_USERS, encoding="utf-8")
+    (directory / "movies.csv").write_text("\n".join(PEER_MOVIES) + "\n", encoding="utf-8")
+    (directory / "ratings.csv").write_text(PEER_RATINGS, encoding="utf-8")
+    (directory / "watch_history.csv").write_text("\n".join(peer_watch_rows()) + "\n", encoding="utf-8")
+    return directory
 
 
 @pytest.fixture(scope="session")
