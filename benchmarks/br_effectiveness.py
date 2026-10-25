@@ -73,24 +73,43 @@ def main() -> None:
     check(rows, "BR2", "Viewer", "live window has ranks 1..10 and is < 10 min old",
           f"{len(live)} rows, newest window {age:.1f} min old", sorted(live.get("rank", [])) == list(range(1, 11)) and age < 10, ms)
 
-    # BR3: every recommendation comes from the user's favourite genres; coverage of users with history.
+    # BR3: lists are complete, never contain a watched title and match the independent Pandas computation.
+    watched = set(zip(curated[3]["user_id"], curated[3]["movie_id"]))
     users = random.Random(3).sample(sorted(expected["user_engagement"]["user_id"]), args.sample_users)
+    reference_lists = expected["user_recommendations"].groupby("user_id")["movie_id"].apply(list).to_dict()
     prefs = expected["user_preferences"].set_index("user_id")["favorite_genres"]
-    in_genre, with_history, total_ms = 0, 0, 0.0
-    for user in users:
-        favorite, ms = timed(session, "SELECT favorite_genres FROM user_preferences WHERE user_id = %s", [user])
-        total_ms += ms
-        if favorite.empty:
-            continue
-        with_history += 1
-        genres_of_user = favorite.iloc[0]["favorite_genres"].split("|")
-        recs = pd.concat([query_frame(session, "SELECT genre FROM movies_by_genre_rating WHERE genre = %s LIMIT 8", [g]) for g in genres_of_user])
-        in_genre += int(not recs.empty and set(recs["genre"]) <= set(genres_of_user) and favorite.iloc[0]["favorite_genres"] == prefs.get(user))
-    check(rows, "BR3", "Viewer", f"recommendations stay in the user's top-2 genres ({args.sample_users} random users)",
-          f"{in_genre}/{with_history} users with history OK", in_genre == with_history, total_ms / args.sample_users)
-    covered = len(expected["user_preferences"]) / len(expected["user_engagement"])
-    check(rows, "BR3", "Viewer", "share of users that get personalised results",
-          f"{covered:.2%} (rest are cold-start, shown popular picks)", covered > 0.95, 0.0)
+    for label, table in (("genre-based", "user_recommendations"), ("ALS", "user_recommendations_als")):
+        listed = served = leaks = bad_ranks = wrong_genre = matches = 0
+        total_ms = 0.0
+        for user in users:
+            recs, ms = timed(session, f"SELECT rank, movie_id, genre, source FROM {table} WHERE user_id = %s", [user])
+            total_ms += ms
+            if recs.empty:
+                continue
+            served += 1
+            listed += len(recs)
+            leaks += sum((user, movie) in watched for movie in recs["movie_id"])
+            bad_ranks += int(recs["rank"].tolist() != list(range(1, len(recs) + 1)))
+            if table == "user_recommendations":
+                favorite = prefs.get(user, "").split("|")
+                wrong_genre += int(not recs.loc[recs["source"] == "genre", "genre"].isin(favorite).all())
+                matches += int(recs["movie_id"].tolist() == reference_lists.get(user))
+        check(rows, "BR3", "Viewer", f"{label}: no watched title is recommended ({args.sample_users} random users)",
+              f"{leaks} watched titles in {listed:,} recommendations for {served} users with a list",
+              leaks == 0 and bad_ranks == 0 and served > 0, total_ms / args.sample_users)
+        if table == "user_recommendations":
+            check(rows, "BR3", "Viewer", "genre-based: favourite-genre rows stay in the user's top-2 genres and lists equal the Pandas lists",
+                  f"{wrong_genre} users with a foreign genre; {matches}/{served} lists identical",
+                  wrong_genre == 0 and matches == served == args.sample_users, total_ms / args.sample_users)
+    genre_served = expected["user_recommendations"].query("source == 'genre'")["user_id"].nunique() / len(expected["user_engagement"])
+    check(rows, "BR3", "Viewer", "share of users that get favourite-genre recommendations (the rest are cold-start, shown popular titles)",
+          f"{genre_served:.2%} genre-based; every user has a list: {len(reference_lists) == len(expected['user_engagement'])}",
+          genre_served > 0.95 and len(reference_lists) == len(expected["user_engagement"]), 0.0)
+    als_users, ms = timed(session, "SELECT DISTINCT user_id FROM user_recommendations_als")
+    with_history = curated[3]["user_id"].nunique()
+    check(rows, "BR3", "Viewer", "ALS serves every user with watch history (cold-start users fall back to the genre-based list)",
+          f"{len(als_users):,} of {with_history:,} users with history ({len(als_users) / len(expected['user_engagement']):.2%} of all users)",
+          len(als_users) == with_history, ms)
 
     # BR4: Bayesian ranking equals Pandas.
     rated, ms = timed(session, "SELECT movie_id FROM top_rated_movies WHERE bucket = 'all' LIMIT 10")
@@ -102,17 +121,33 @@ def main() -> None:
     check(rows, "BR4", "Analyst", "no top-10 title rests on very few ratings", f"min rating_count in top-10 = {min_ratings}",
           min_ratings >= 10, ms)
 
-    # BR5: genre views add up to all views.
-    genre_frame, ms = timed(session, "SELECT genre, views FROM genre_popularity")
+    # BR5: genre views add up to all views; unique viewers per genre equal the Pandas distinct count.
+    genre_frame, ms = timed(session, "SELECT genre, views, unique_viewers FROM genre_popularity")
     summary = query_frame(session, "SELECT views FROM summary_metrics WHERE bucket = 'all'").iloc[0]["views"]
     check(rows, "BR5", "Analyst", "sum of genre views = total views", f"{int(genre_frame['views'].sum()):,} vs {int(summary):,}",
           int(genre_frame["views"].sum()) == int(summary), ms)
+    reference = expected["genre_popularity"].set_index("genre")["unique_viewers"]
+    viewers = genre_frame.set_index("genre")["unique_viewers"]
+    check(rows, "BR5", "Analyst", "unique viewers per genre equal the Pandas distinct count and never exceed the user count",
+          f"{len(viewers)} genres, max {int(viewers.max()):,} of {len(expected['user_engagement']):,} users",
+          viewers.sort_index().tolist() == reference.sort_index().tolist() and int(viewers.max()) <= len(expected["user_engagement"]), ms)
 
-    # BR6: engagement distribution covers every user and adds up.
-    engagement, ms = timed(session, "SELECT views FROM user_engagement")
-    check(rows, "BR6", "Analyst", "engagement histogram covers all users; views add up",
+    # BR6: one scan returns views, watch minutes and active days of every user; all three add up.
+    engagement, ms = timed(
+        session, "SELECT user_id, subscription_plan, region, views, watch_minutes, active_days FROM user_engagement")
+    reference = expected["user_engagement"].set_index("user_id").sort_index()
+    scanned = engagement.set_index("user_id").sort_index()
+    check(rows, "BR6", "Analyst", "engagement scan covers all users; views add up",
           f"{len(engagement):,} users, {int(engagement['views'].sum()):,} views",
-          len(engagement) == len(expected["user_engagement"]) and int(engagement["views"].sum()) == int(summary), ms)
+          len(engagement) == len(reference) and int(engagement["views"].sum()) == int(summary), ms)
+    check(rows, "BR6", "Analyst", "watch minutes and active days per user equal the Pandas values",
+          f"{int(engagement['watch_minutes'].sum()):,} minutes, active days 0-{int(engagement['active_days'].max())} "
+          f"(mean {engagement['active_days'].mean():.1f}, median {engagement['active_days'].median():.0f}), "
+          f"median watch minutes {engagement['watch_minutes'].median():.0f}",
+          scanned["watch_minutes"].tolist() == reference["watch_minutes"].tolist()
+          and scanned["active_days"].tolist() == reference["active_days"].tolist()
+          and int(engagement["watch_minutes"].sum()) == int(curated[3]["watch_duration"].sum())
+          and int(engagement["active_days"].max()) <= curated[3]["watch_timestamp"].dt.date.nunique(), ms)
 
     # BR7: top-30% scatter has the expected movies.
     n_top = math.ceil(len(performance) * TOP_SHARE)

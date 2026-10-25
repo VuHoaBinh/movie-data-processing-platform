@@ -50,7 +50,7 @@ def child(engine: str, raw_dir: Path, output_dir: Path) -> None:
     else:
         from src import spark_batch_job
 
-        spark_batch_job.run(raw_dir, warehouse_dir=None, cassandra_host=None, csv_output_dir=output_dir)
+        spark_batch_job.run(raw_dir, warehouse_dir=None, cassandra_host=None, csv_output_dir=output_dir, als=False)
     print("RESULT " + json.dumps({"seconds": time.perf_counter() - started}))
 
 

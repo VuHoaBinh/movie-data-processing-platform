@@ -115,6 +115,35 @@ CREATE TABLE IF NOT EXISTS user_preferences (
   favorite_genres text
 );
 
+-- BR3: precomputed top-10 per user (watched titles excluded), one partition per user, rank 1..10.
+-- `source` is 'genre' (favourite genres) or 'popular' (filler / cold start) here, 'als' in the ALS table.
+CREATE TABLE IF NOT EXISTS user_recommendations (
+  user_id text,
+  rank int,
+  movie_id text,
+  title text,
+  genre text,
+  source text,
+  weighted_rating double,
+  avg_rating double,
+  views bigint,
+  PRIMARY KEY ((user_id), rank)
+) WITH CLUSTERING ORDER BY (rank ASC);
+
+-- BR3 alternative (Spark MLlib ALS): same shape; only users with watch history have rows.
+CREATE TABLE IF NOT EXISTS user_recommendations_als (
+  user_id text,
+  rank int,
+  movie_id text,
+  title text,
+  genre text,
+  source text,
+  weighted_rating double,
+  avg_rating double,
+  views bigint,
+  PRIMARY KEY ((user_id), rank)
+) WITH CLUSTERING ORDER BY (rank ASC);
+
 -- BR10: time series, one small partition.
 CREATE TABLE IF NOT EXISTS daily_views (
   bucket text,
@@ -161,3 +190,31 @@ CREATE TABLE IF NOT EXISTS live_trending_spark (
   PRIMARY KEY ((day), window_start, rank)
 ) WITH CLUSTERING ORDER BY (window_start DESC, rank ASC)
   AND default_time_to_live = 259200;
+
+-- Pipeline metadata for the Data Engineering page, written by the Spark batch after the serving tables.
+-- Rejected rows per cleaning rule (reason 'accepted' = rows kept), the same numbers as curated.quality_report.
+CREATE TABLE IF NOT EXISTS quality_report (
+  table_name text,
+  reason text,
+  rows bigint,
+  PRIMARY KEY ((table_name), reason)
+);
+
+-- Rows written to each serving table by the latest batch run.
+CREATE TABLE IF NOT EXISTS batch_table_rows (
+  table_name text PRIMARY KEY,
+  rows bigint
+);
+
+-- One row per successful batch run, newest first; kept 90 days.
+CREATE TABLE IF NOT EXISTS batch_runs (
+  bucket text,
+  finished_at timestamp,
+  started_at timestamp,
+  status text,
+  seconds double,
+  rows_written bigint,
+  stage_seconds map<text, double>,
+  PRIMARY KEY ((bucket), finished_at)
+) WITH CLUSTERING ORDER BY (finished_at DESC)
+  AND default_time_to_live = 7776000;

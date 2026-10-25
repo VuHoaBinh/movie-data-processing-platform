@@ -8,6 +8,7 @@ from pathlib import Path
 import pandas as pd
 
 from src.data_quality import Report, clean_pandas, format_report
+from src.recommendations import recommend_pandas
 
 
 RAW_FILES = ("users.csv", "movies.csv", "ratings.csv", "watch_history.csv")
@@ -150,6 +151,8 @@ def build_tables(
         .agg(favorite_genres=lambda values: "|".join(values))
     )
 
+    user_recommendations = recommend_pandas(users, movie_performance, user_preferences, watches)
+
     daily_views = (
         joined.assign(day=joined["watch_timestamp"].dt.date)
         .groupby("day", as_index=False)
@@ -178,6 +181,7 @@ def build_tables(
         "user_engagement": user_engagement,
         "user_segments": user_segments,
         "user_preferences": user_preferences,
+        "user_recommendations": user_recommendations,
         "daily_views": daily_views,
         "hourly_views": hourly_views,
         "summary_metrics": summary_metrics,

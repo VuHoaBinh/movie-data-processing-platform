@@ -61,6 +61,22 @@ DASHBOARD_QUERIES: tuple[DashboardQuery, ...] = (
         (GENRE,),
     ),
     DashboardQuery(
+        "user_recommendations", "BR3", "point",
+        "SELECT rank, title, genre, source, weighted_rating, avg_rating, views "
+        "FROM user_recommendations WHERE user_id = %s",
+        f"SELECT rank, title, genre, source, weighted_rating, avg_rating, views "
+        f"FROM analytics.user_recommendations WHERE user_id = '{USER}' ORDER BY rank",
+        (USER,),
+    ),
+    DashboardQuery(
+        "user_recommendations_als", "BR3", "point",
+        "SELECT rank, title, genre, source, weighted_rating, avg_rating, views "
+        "FROM user_recommendations_als WHERE user_id = %s",
+        f"SELECT rank, title, genre, source, weighted_rating, avg_rating, views "
+        f"FROM analytics.user_recommendations_als WHERE user_id = '{USER}' ORDER BY rank",
+        (USER,),
+    ),
+    DashboardQuery(
         "top_rated", "BR4", "range",
         "SELECT title, genre, weighted_rating, avg_rating, rating_count "
         "FROM top_rated_movies WHERE bucket = 'all' LIMIT 10",
