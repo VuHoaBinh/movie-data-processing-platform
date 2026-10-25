@@ -12,8 +12,14 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from src.business_rules import (
+    ALL_GENRES, FLAGGED_SHARE_LIMIT, GENRE_DROP_ALERT, INACTIVE_SHARE_LIMIT, MOVING_AVERAGE_DAYS,
+    PEER_COMPLETION_PERCENTILE, PEER_MIN_VIEWS_FOR_COMPLETION,
+    PEER_VIEWS_PERCENTILE, TREND_DAMPING, TREND_MIN_RECENT_VIEWS, TREND_WINDOW_DAYS, WEEKDAY, WEEKEND,
+)
 from src.cassandra_store import BATCH_BUCKET, CassandraUnavailable, connect, query_frame, table_counts
 from src.data_quality import REASONS
+from src.trends import dense_series
 
 try:
     from kafka import KafkaProducer
@@ -26,15 +32,23 @@ RAW_DIR = Path("data")
 BATCH_LOG = RAW_DIR / "batch_refresh.log"
 TOP_SHARE = 0.30  # BR7 shows the top 30% of movies by views.
 LIVE_STALE_MINUTES = 10  # BR2 live window older than this is "waiting for Flink".
-INACTIVE_ALERT_SHARE = 0.40  # Manager alert: more than 40% of users are Inactive (<= 10 views).
-LOW_ENGAGEMENT_SHARE = 0.10  # Manager: a title is low-engagement below 10% of the average views per title.
-TREND_DROP_ALERT = 0.10  # Manager alert: last 7 days of views fell more than 10% against the 7 days before.
+# Manager alert limits live in src/business_rules.py (INACTIVE_SHARE_LIMIT, FLAGGED_SHARE_LIMIT, GENRE_DROP_ALERT).
+WEEK_DAYS = MOVING_AVERAGE_DAYS  # the weekly comparison uses the same 7-day window as the moving average.
+BR8_LIST_ROWS = 20  # titles listed in the BR8 table.
+RISING_ROWS = 10  # titles listed in the BR2 "rising now" table.
+PICKER_MATCHES = 50  # a search box narrows a picker to at most this many options before the selectbox appears.
+INDEX_TTL = 3600  # seconds the id / title indexes behind the pickers stay cached on the server.
 LOG_TAIL_LINES = 25
 STAGE_ORDER = ["hive_raw", "hive_curated", "build_tables", "als", "hive_analytics", "cassandra_load"]
 
 # One colour per genre, shared by every chart; segments and plans have fixed colours too.
 ACCENT = "#4C78A8"
 SEGMENT_COLORS = {"Inactive": "#E4572E", "Casual": "#F3A712", "Active": "#29A375"}
+REASON_LABELS = {
+    "low_both": "Low views and completion", "both": "Low views and completion",
+    "low_views": "Few views", "low_completion": "Abandoned (low completion)",
+}
+REASON_COLORS = {"Low views and completion": "#E4572E", "Few views": "#F3A712", "Abandoned (low completion)": "#5C80BC"}
 PLAN_COLORS = {"Basic": "#9DB4D8", "Standard": "#5C80BC", "Premium": "#2D4A82"}
 # The first entry is the default of the radio: ALS measured better than the genre-based lists offline
 # (docs/evaluation.md 3.4); genre-based stays as the explainable alternative and as the fallback for users
@@ -71,6 +85,48 @@ def engagement_scan() -> pd.DataFrame:
         get_session(),
         "SELECT user_id, subscription_plan, region, views, watch_minutes, active_days FROM user_engagement",
     )
+
+
+@st.cache_data(ttl=INDEX_TTL, show_spinner=False)
+def user_index() -> list[str]:
+    """Every user id, kept on the server only: the widgets below never receive more than PICKER_MATCHES of them."""
+    return sorted(query_frame(get_session(), "SELECT user_id FROM user_engagement")["user_id"])
+
+
+@st.cache_data(ttl=INDEX_TTL, show_spinner=False)
+def movie_index() -> pd.DataFrame:
+    return (
+        query_frame(get_session(), "SELECT movie_id, title, genre, duration FROM movie_performance")
+        .sort_values("movie_id").reset_index(drop=True)
+    )
+
+
+def pick_user(key: str, label: str = "User") -> str | None:
+    """A search box plus a selectbox with at most PICKER_MATCHES matching ids (never the 50,000 of them)."""
+    term = st.text_input("Find a user (part of the ID)", key=f"{key}_term", placeholder="U00042").strip().upper()
+    matches = [user for user in user_index() if term in user]
+    shown = matches[:PICKER_MATCHES]
+    if not shown:
+        st.info("No user matches this search.")
+        return None
+    st.caption(f"{len(shown)} of {whole(len(matches))} matching users shown" + ("; type more to narrow" if len(matches) > len(shown) else ""))
+    return st.selectbox(label, shown, key=f"{key}_select")
+
+
+def pick_movie(key: str, label: str = "Title") -> str | None:
+    """A search box (title or ID) plus a selectbox with at most PICKER_MATCHES matching titles."""
+    term = st.text_input("Find a title (part of the name or ID)", key=f"{key}_term", placeholder="spider").strip()
+    movies = movie_index()
+    if term:
+        hit = movies["title"].str.contains(term, case=False, na=False, regex=False) | movies["movie_id"].str.contains(term, case=False, regex=False)
+        movies = movies[hit]
+    shown = movies.head(PICKER_MATCHES)
+    if shown.empty:
+        st.info("No title matches this search.")
+        return None
+    st.caption(f"{len(shown)} of {whole(len(movies))} matching titles shown" + ("; type more to narrow" if len(movies) > len(shown) else ""))
+    names = dict(zip(shown["movie_id"], shown["title"]))
+    return st.selectbox(label, list(names), format_func=lambda movie_id: f"{names[movie_id]} ({movie_id})", key=f"{key}_select")
 
 
 def whole(value) -> str:
@@ -223,15 +279,14 @@ def render_record_form() -> None:
         "Submit appends the event to the raw CSV, sends it to Kafka for BR2 and refreshes the batch "
         "tables with Spark in the background."
     )
-    users = cql("SELECT user_id FROM user_engagement")["user_id"].sort_values().tolist()
-    movie_options = cql("SELECT movie_id, title, genre, duration FROM movie_performance").sort_values("movie_id")
+    form_user = pick_user("record_user")
+    form_movie = pick_movie("record_movie")
+    if form_user is None or form_movie is None:
+        return
+    movie_row = movie_index().set_index("movie_id").loc[form_movie]
     with st.form("record_watch"):
-        form_user = st.selectbox("User", users)
-        form_movie = st.selectbox(
-            "Movie", movie_options["movie_id"].tolist(),
-            format_func=lambda movie_id: movie_options.loc[movie_options["movie_id"] == movie_id, "title"].iloc[0],
-        )
-        movie_duration = int(movie_options.loc[movie_options["movie_id"] == form_movie, "duration"].iloc[0])
+        st.markdown(f"**{form_user}** watches **{movie_row['title']}** ({movie_row['genre']})")
+        movie_duration = int(movie_row["duration"])
         form_minutes = st.slider("Minutes watched", min_value=1, max_value=max(1, movie_duration), value=max(1, movie_duration // 2))
         form_device = st.selectbox("Device", ["Web", "Mobile", "Tablet", "TV"])
         submitted = st.form_submit_button("Save view event")
@@ -258,7 +313,6 @@ def render_record_form() -> None:
                     value_serializer=lambda value: json.dumps(value, ensure_ascii=False).encode("utf-8"),
                     acks="all",
                 )
-                movie_row = movie_options.loc[movie_options["movie_id"] == form_movie].iloc[0]
                 producer.send(
                     os.getenv("KAFKA_WATCH_TOPIC", "watch-events"),
                     key=str(form_movie).encode("utf-8"),
@@ -282,6 +336,78 @@ def render_record_form() -> None:
 
 
 # ------------------------------------------------------------------ Viewer
+
+
+def render_rising() -> None:
+    st.subheader("Rising now")
+    rising = cql(
+        "SELECT title, genre, views_recent, views_previous, growth, reference_date "
+        "FROM trending_growth WHERE bucket = %s LIMIT %s",
+        (BATCH_BUCKET, RISING_ROWS),
+    )
+    ask("BR2", "Which titles gained the most views in the latest week compared with the week before? (batch)")
+    if rising.empty:
+        st.info("No title has enough recent views to be ranked yet.")
+        return
+    st.caption(
+        f"Last {TREND_WINDOW_DAYS} days up to {rising['reference_date'].iloc[0]} against the {TREND_WINDOW_DAYS} days before. "
+        f"Growth is the gain divided by the previous views plus {TREND_DAMPING}, so a few extra views on a tiny title do not "
+        f"count; titles need at least {TREND_MIN_RECENT_VIEWS} views in the week."
+    )
+    st.dataframe(
+        rising.drop(columns="reference_date"),
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "title": "Title", "genre": "Genre",
+            "views_recent": st.column_config.NumberColumn(f"Last {TREND_WINDOW_DAYS} days", format="%d"),
+            "views_previous": st.column_config.NumberColumn(f"Previous {TREND_WINDOW_DAYS} days", format="%d"),
+            "growth": st.column_config.NumberColumn("Growth", format="%.2f"),
+        },
+    )
+
+
+def render_recommendations() -> None:
+    ask("BR3", "What should this viewer watch next? Titles already watched are never suggested.")
+    pick_col, method_col = st.columns([1, 2])
+    with pick_col:
+        selected_user = pick_user("viewer_user", "Recommendations for")
+    with method_col:
+        method = st.radio("Recommender", list(RECOMMENDERS), horizontal=True)
+        st.caption(RECOMMENDERS[method][1])
+    if selected_user is None:
+        return
+    preference = cql("SELECT favorite_genres FROM user_preferences WHERE user_id = %s", (selected_user,))
+    favorite_genres = preference.iloc[0]["favorite_genres"].split("|") if not preference.empty else []
+    st.markdown(
+        "**Most-watched genres:** " + (", ".join(favorite_genres) if favorite_genres else "none yet (new viewer)")
+    )
+
+    columns = "rank, title, genre, source, weighted_rating, avg_rating, views"
+    table = RECOMMENDERS[method][0]
+    recommendations = read_or_none(f"SELECT {columns} FROM {table} WHERE user_id = %s", (selected_user,))
+    if recommendations is not None and recommendations.empty and table != "user_recommendations":
+        st.info("ALS needs at least one watch from this user, so the genre-based list is shown instead.")
+        recommendations = read_or_none(f"SELECT {columns} FROM user_recommendations WHERE user_id = %s", (selected_user,))
+    if recommendations is None:
+        pass
+    elif recommendations.empty:
+        st.info("No recommendations for this user in the serving layer yet.")
+    else:
+        recommendations["source"] = recommendations["source"].map(
+            {"genre": "Favourite genre", "popular": "Popular", "als": "Similar viewers"}
+        )
+        st.dataframe(
+            recommendations,
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "rank": "#", "title": "Title", "genre": "Genre", "source": "Why",
+                "weighted_rating": st.column_config.NumberColumn("Weighted rating", format="%.2f"),
+                "avg_rating": st.column_config.NumberColumn("Avg rating", format="%.2f"),
+                "views": st.column_config.NumberColumn("Views", format="%d"),
+            },
+        )
 
 
 def viewer_page() -> None:
@@ -315,6 +441,7 @@ def viewer_page() -> None:
         )
 
     with trending_tab:
+        render_rising()
         left, right = st.columns(2)
         with left:
             st.subheader("Most viewed of all time")
@@ -337,45 +464,7 @@ def viewer_page() -> None:
             render_live_trending()
 
     with for_you_tab:
-        users = cql("SELECT user_id FROM user_engagement")["user_id"].sort_values().tolist()
-        ask("BR3", "What should this viewer watch next? Titles already watched are never suggested.")
-        pick_col, method_col = st.columns([1, 2])
-        with pick_col:
-            selected_user = st.selectbox("Recommendations for", users)
-        with method_col:
-            method = st.radio("Recommender", list(RECOMMENDERS), horizontal=True)
-            st.caption(RECOMMENDERS[method][1])
-        preference = cql("SELECT favorite_genres FROM user_preferences WHERE user_id = %s", (selected_user,))
-        favorite_genres = preference.iloc[0]["favorite_genres"].split("|") if not preference.empty else []
-        st.markdown(
-            "**Most-watched genres:** " + (", ".join(favorite_genres) if favorite_genres else "none yet (new viewer)")
-        )
-
-        columns = "rank, title, genre, source, weighted_rating, avg_rating, views"
-        table = RECOMMENDERS[method][0]
-        recommendations = read_or_none(f"SELECT {columns} FROM {table} WHERE user_id = %s", (selected_user,))
-        if recommendations is not None and recommendations.empty and table != "user_recommendations":
-            st.info("ALS needs at least one watch from this user, so the genre-based list is shown instead.")
-            recommendations = read_or_none(f"SELECT {columns} FROM user_recommendations WHERE user_id = %s", (selected_user,))
-        if recommendations is None:
-            pass
-        elif recommendations.empty:
-            st.info("No recommendations for this user in the serving layer yet.")
-        else:
-            recommendations["source"] = recommendations["source"].map(
-                {"genre": "Favourite genre", "popular": "Popular", "als": "Similar viewers"}
-            )
-            st.dataframe(
-                recommendations,
-                hide_index=True,
-                width="stretch",
-                column_config={
-                    "rank": "#", "title": "Title", "genre": "Genre", "source": "Why",
-                    "weighted_rating": st.column_config.NumberColumn("Weighted rating", format="%.2f"),
-                    "avg_rating": st.column_config.NumberColumn("Avg rating", format="%.2f"),
-                    "views": st.column_config.NumberColumn("Views", format="%d"),
-                },
-            )
+        render_recommendations()
 
     with st.expander("Record a movie view (demo input)"):
         render_record_form()
@@ -538,79 +627,221 @@ def manager_page() -> None:
     st.header("Manager: what needs attention")
     st.caption("Headline numbers and alerts first, then the lists and charts behind them (BR8 to BR10).")
 
+    # BR9: segments come from quantiles of views per user; the cut-offs are stored with them.
     segments = cql("SELECT segment, users, views FROM user_segments").set_index("segment")
+    cuts = cql(
+        "SELECT percentile, views_threshold, users FROM segment_thresholds WHERE bucket = %s", (BATCH_BUCKET,)
+    ).sort_values("percentile")
+    low_cut, high_cut = (int(value) for value in cuts["views_threshold"])
     total_users = int(segments["users"].sum())
-    inactive_share = int(segments.loc["Inactive", "users"]) / total_users if total_users and "Inactive" in segments.index else 0.0
-    mean_views = int(metrics["views"]) / max(1, int(metrics["movies"]))
-    low_threshold = max(1, math.ceil(mean_views * LOW_ENGAGEMENT_SHARE))
-    low_count = int(cql(
-        "SELECT COUNT(*) AS n FROM low_engagement_movies WHERE bucket = %s AND views < %s", (BATCH_BUCKET, low_threshold)
-    ).iloc[0]["n"])
-    daily = cql("SELECT day, views FROM daily_views WHERE bucket = %s", (BATCH_BUCKET,))
-    daily["day"] = pd.to_datetime(daily["day"].astype(str))
-    daily = daily.sort_values("day")
-    last_week, previous_week = int(daily["views"].tail(7).sum()), int(daily["views"].iloc[-14:-7].sum())
-    trend = (last_week - previous_week) / previous_week if previous_week else 0.0
+    inactive_users = int(segments.loc["Inactive", "users"]) if "Inactive" in segments.index else 0
+    inactive_share = inactive_users / total_users if total_users else 0.0
+    segment_labels = {
+        "Inactive": f"Inactive (up to {low_cut} views)",
+        "Casual": f"Casual ({low_cut + 1} to {high_cut} views)",
+        "Active": f"Active (over {high_cut} views)",
+    }
+
+    # BR8: titles that are low against their genre peers.
+    peers = cql(
+        "SELECT genre, movies, views_p10, completion_p10, low_views, low_completion, low_both, flagged "
+        "FROM genre_engagement_peers"
+    ).sort_values("genre")
+    flagged_total, both_total, catalogue = int(peers["flagged"].sum()), int(peers["low_both"].sum()), int(peers["movies"].sum())
+    flagged_share = flagged_total / catalogue if catalogue else 0.0
+
+    # BR10: the genre x day grid gives the weekly comparison per genre and for the platform.
+    grid = cql("SELECT day, genre, views, views_ma7 FROM genre_daily_views WHERE bucket = %s", (BATCH_BUCKET,))
+    grid["day"] = pd.to_datetime(grid["day"].astype(str))
+    last_days = sorted(grid["day"].unique())[-2 * WEEK_DAYS:]
+    recent_days, earlier_days = last_days[WEEK_DAYS:], last_days[:WEEK_DAYS]
+    week_views = pd.DataFrame({
+        "last_7_days": grid[grid["day"].isin(recent_days)].groupby("genre")["views"].sum(),
+        "previous_7_days": grid[grid["day"].isin(earlier_days)].groupby("genre")["views"].sum(),
+    })
+    week_views["change"] = week_views["last_7_days"] / week_views["previous_7_days"].where(week_views["previous_7_days"] > 0) - 1
+    last_week, previous_week = int(week_views["last_7_days"].sum()), int(week_views["previous_7_days"].sum())
+    trend = last_week / previous_week - 1 if previous_week else 0.0
 
     cards = st.columns(4)
     cards[0].metric("Users", whole(total_users), border=True)
-    cards[1].metric("Inactive users", f"{inactive_share:.1%}", f"{whole(segments.loc['Inactive', 'users'])} users" if "Inactive" in segments.index else None,
+    cards[1].metric("Inactive users", f"{inactive_share:.1%}", f"{whole(inactive_users)} users, up to {low_cut} views",
                     delta_color="off", delta_arrow="off", border=True)
-    cards[2].metric("Low-engagement titles", whole(low_count), f"under {low_threshold} views", delta_color="off", delta_arrow="off", border=True)
-    cards[3].metric("Views, last 7 days", whole(last_week), f"{trend:+.1%} vs the 7 days before", border=True)
+    cards[2].metric("Flagged titles (vs genre peers)", whole(flagged_total), f"{whole(both_total)} low on both",
+                    delta_color="off", delta_arrow="off", border=True)
+    cards[3].metric(f"Views, last {WEEK_DAYS} days", whole(last_week), f"{trend:+.1%} vs the {WEEK_DAYS} days before", border=True)
 
     with st.container(border=True):
         st.markdown("**Alerts**")
-        if inactive_share > INACTIVE_ALERT_SHARE:
-            st.warning(f"{inactive_share:.1%} of users are Inactive (10 views or fewer), above the {INACTIVE_ALERT_SHARE:.0%} limit: plan a win-back campaign (BR9).")
+        if inactive_share > INACTIVE_SHARE_LIMIT:
+            st.warning(
+                f"{inactive_share:.1%} of users are Inactive (up to {low_cut} views, the quietest quarter), above the "
+                f"{INACTIVE_SHARE_LIMIT:.0%} limit: many users sit at the same low count; plan a win-back campaign (BR9)."
+            )
         else:
-            st.success(f"Inactive users are {inactive_share:.1%}, within the {INACTIVE_ALERT_SHARE:.0%} limit (BR9).")
-        share_low = low_count / max(1, int(metrics["movies"]))
-        if low_count:
-            st.warning(f"{whole(low_count)} titles ({share_low:.1%} of the catalogue) have fewer than {low_threshold} views, "
-                       f"{LOW_ENGAGEMENT_SHARE:.0%} of the average of {mean_views:.0f}: review them before renewing licences (BR8).")
+            st.success(f"Inactive users are {inactive_share:.1%}, within the {INACTIVE_SHARE_LIMIT:.0%} limit (BR9).")
+        if flagged_share > FLAGGED_SHARE_LIMIT:
+            st.warning(
+                f"{whole(flagged_total)} titles ({flagged_share:.1%} of the catalogue) are low against their genre, above the "
+                f"{FLAGGED_SHARE_LIMIT:.0%} limit; start with the {whole(both_total)} that are low on both views and completion (BR8)."
+            )
         else:
-            st.success("No title is below the low-engagement threshold (BR8).")
-        if trend < -TREND_DROP_ALERT:
-            st.warning(f"Views fell {abs(trend):.1%} against the previous 7 days (BR10).")
+            st.success(
+                f"{whole(flagged_total)} titles ({flagged_share:.1%}) are low against their genre, within the "
+                f"{FLAGGED_SHARE_LIMIT:.0%} limit; {whole(both_total)} are low on both views and completion (BR8)."
+            )
+        falling = week_views[week_views["change"] < -GENRE_DROP_ALERT].sort_values("change")
+        if len(falling):
+            names = ", ".join(f"{genre} {change:+.1%}" for genre, change in falling["change"].items())
+            st.warning(f"Views fell more than {GENRE_DROP_ALERT:.0%} against the previous {WEEK_DAYS} days in: {names} (BR10).")
         else:
-            st.success(f"Views are {trend:+.1%} against the previous 7 days, within the {TREND_DROP_ALERT:.0%} drop limit (BR10).")
+            st.success(f"No genre lost more than {GENRE_DROP_ALERT:.0%} of its views against the previous {WEEK_DAYS} days (BR10).")
 
-    left, right = st.columns(2)
-    with left:
-        st.subheader("BR8 - Low-engagement titles")
-        ask("BR8", "Which titles are watched the least and are candidates to drop?")
-        st.dataframe(
-            cql(
-                "SELECT movie_id, title, genre, views, completion_rate "
-                "FROM low_engagement_movies WHERE bucket = %s LIMIT 10",
-                (BATCH_BUCKET,),
-            ),
-            hide_index=True,
-            width="stretch",
-            column_config={
-                "movie_id": "ID", "title": "Title", "genre": "Genre",
-                "views": st.column_config.NumberColumn("Views", format="%d"),
-                "completion_rate": st.column_config.NumberColumn("Completion", format="%.1f%%"),
-            },
-        )
-    with right:
-        st.subheader("BR9 - User segments")
-        ask("BR9", "How many users are Inactive, Casual and Active?")
-        st.plotly_chart(
-            styled(px.pie(
-                segments.reset_index(), names="segment", values="users", color="segment",
-                color_discrete_map=SEGMENT_COLORS, title="Users by segment",
-            )),
-            width="stretch", key="br9_segments",
-        )
-
-    st.subheader("BR10 - Trend")
-    ask("BR10", "How do daily views change over time?")
-    st.plotly_chart(
-        styled(px.line(daily, x="day", y="views", title="Views per day", color_discrete_sequence=[ACCENT]), height=300),
-        width="stretch", key="br10_daily",
+    st.subheader("BR8 - Titles that are low against their genre")
+    ask("BR8", "Which titles get few views or are abandoned compared with other titles of the same genre?")
+    st.caption(
+        f"A title is flagged when its views are at or below the {PEER_VIEWS_PERCENTILE}th percentile of its genre, or when "
+        f"it has at least {PEER_MIN_VIEWS_FOR_COMPLETION} views and its completion is at or below the genre's "
+        f"{PEER_COMPLETION_PERCENTILE}th percentile. Titles low on both come first."
     )
+    reasons = peers.melt(
+        id_vars="genre", value_vars=["low_both", "low_views", "low_completion"], var_name="reason", value_name="titles"
+    ).replace({"reason": REASON_LABELS})
+    left, right = st.columns([3, 2])
+    left.plotly_chart(
+        styled(px.bar(
+            reasons, x="genre", y="titles", color="reason", color_discrete_map=REASON_COLORS,
+            category_orders={"reason": list(REASON_LABELS.values())}, title="Flagged titles by genre and reason",
+        )),
+        width="stretch", key="br8_reasons",
+    )
+    with right:
+        genre_filter = st.selectbox("Show titles of", ["All genres"] + genres, key="br8_genre")
+        if genre_filter == "All genres":
+            flagged = cql(
+                "SELECT movie_id, title, genre, views, completion_rate, genre_views_p10, genre_completion_p10, reason "
+                "FROM low_engagement_movies WHERE bucket = %s LIMIT %s",
+                (BATCH_BUCKET, BR8_LIST_ROWS),
+            )
+        else:
+            flagged = cql(
+                "SELECT movie_id, title, genre, views, completion_rate, genre_views_p10, genre_completion_p10, reason "
+                "FROM low_engagement_by_genre WHERE genre = %s LIMIT %s",
+                (genre_filter, BR8_LIST_ROWS),
+            )
+        flagged["reason"] = flagged["reason"].map(REASON_LABELS)
+        st.caption(f"First {len(flagged)} titles, worst first (low on both, then views, then completion)")
+    st.dataframe(
+        flagged,
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "movie_id": "ID", "title": "Title", "genre": "Genre", "reason": "Why flagged",
+            "views": st.column_config.NumberColumn("Views", format="%d"),
+            "completion_rate": st.column_config.NumberColumn("Completion", format="%.1f%%"),
+            "genre_views_p10": st.column_config.NumberColumn("Genre p10 views", format="%d"),
+            "genre_completion_p10": st.column_config.NumberColumn("Genre p10 completion", format="%.1f%%"),
+        },
+    )
+    with st.expander("Genre thresholds and counts"):
+        st.dataframe(peers, hide_index=True, width="stretch")
+
+    st.subheader("BR9 - User segments")
+    ask("BR9", "How many users are Inactive, Casual and Active, and where are the cut-offs?")
+    st.caption(
+        f"Cut-offs are the {cuts['percentile'].iloc[0]}th and {cuts['percentile'].iloc[1]}th percentile of views per user, "
+        f"recomputed by every batch: {low_cut} and {high_cut} views."
+    )
+    pie_col, matrix_col = st.columns(2)
+    shown = segments.reset_index().assign(label=lambda frame: frame["segment"].map(segment_labels))
+    pie_col.plotly_chart(
+        styled(px.pie(
+            shown, names="label", values="users", color="label",
+            color_discrete_map={segment_labels[name]: color for name, color in SEGMENT_COLORS.items()},
+            title="Users by segment",
+        )),
+        width="stretch", key="br9_segments",
+    )
+    agreement = cql(
+        "SELECT activity_profile, segment, users FROM segment_agreement WHERE bucket = %s", (BATCH_BUCKET,)
+    )
+    matrix = agreement.pivot(index="activity_profile", columns="segment", values="users").reindex(
+        index=list(SEGMENT_COLORS), columns=list(SEGMENT_COLORS)
+    )
+    agreement_share = int(agreement.loc[agreement["activity_profile"] == agreement["segment"], "users"].sum()) / max(1, int(agreement["users"].sum()))
+    matrix_col.plotly_chart(
+        styled(px.imshow(
+            matrix, text_auto=",", aspect="auto", color_continuous_scale="Blues",
+            labels=dict(x="Segment from views", y="Profile in the data", color="Users"),
+            title=f"Segments vs the generator's activity profile: {agreement_share:.1%} agree",
+        )),
+        width="stretch", key="br9_agreement",
+    )
+
+    st.subheader("BR10 - Trends")
+    ask("BR10", "How do views change over time, by genre, by title, and between weekdays and weekends?")
+    platform_tab, genre_tab, movie_tab, week_tab = st.tabs(["Platform", "By genre", "By title", "Weekdays vs weekends"])
+    with platform_tab:
+        daily = grid.groupby("day", as_index=False)["views"].sum().sort_values("day")
+        daily["Moving average"] = daily["views"].rolling(WEEK_DAYS).mean()
+        st.plotly_chart(
+            styled(px.line(
+                daily, x="day", y=["views", "Moving average"], title="Views per day",
+                color_discrete_sequence=[ACCENT, "#E4572E"],
+            ), height=300),
+            width="stretch", key="br10_daily",
+        )
+    with genre_tab:
+        chosen = st.multiselect("Genres", genres, default=genres[:4], key="br10_genres") or genres
+        smooth = st.toggle(f"{WEEK_DAYS}-day moving average", value=True, key="br10_smooth")
+        column = "views_ma7" if smooth else "views"
+        st.plotly_chart(
+            styled(px.line(
+                grid[grid["genre"].isin(chosen)].sort_values("day"), x="day", y=column, color="genre",
+                color_discrete_map=GENRE_COLORS, title="Views per day by genre" + (f" ({WEEK_DAYS}-day average)" if smooth else ""),
+            ), height=340),
+            width="stretch", key="br10_genre_lines",
+        )
+        st.caption(
+            f"Last {WEEK_DAYS} days against the {WEEK_DAYS} days before, per genre: "
+            + ", ".join(f"{genre} {change:+.1%}" for genre, change in week_views["change"].items())
+        )
+    with movie_tab:
+        movie_id = pick_movie("br10_movie")
+        if movie_id:
+            series = cql("SELECT day, views FROM movie_daily_views WHERE movie_id = %s", (movie_id,))
+            first_day, last_day = grid["day"].min(), grid["day"].max()
+            dense = dense_series(series, first_day, last_day) if not series.empty else None
+            if dense is None:
+                st.info("This title has no views.")
+            else:
+                st.plotly_chart(
+                    styled(px.line(
+                        dense, x="day", y=["views", "views_ma7"], title=f"Views per day for {movie_id}",
+                        color_discrete_sequence=[ACCENT, "#E4572E"],
+                    ), height=320),
+                    width="stretch", key="br10_movie_line",
+                )
+                st.caption(f"{whole(dense['views'].sum())} views on {len(series)} of {len(dense)} days.")
+    with week_tab:
+        split = cql(
+            "SELECT genre, day_type, days, views, avg_daily_views FROM weekday_weekend_views WHERE bucket = %s",
+            (BATCH_BUCKET,),
+        )
+        overall = split[split["genre"] == ALL_GENRES].set_index("day_type")["avg_daily_views"]
+        if {WEEKDAY, WEEKEND} <= set(overall.index):
+            difference = overall[WEEKEND] / overall[WEEKDAY] - 1
+            st.metric(
+                "Views per weekend day against a weekday", f"{difference:+.1%}",
+                f"{overall[WEEKEND]:,.0f} vs {overall[WEEKDAY]:,.0f} views per day", delta_color="off", delta_arrow="off", border=True,
+            )
+        st.plotly_chart(
+            styled(px.bar(
+                split[split["genre"] != ALL_GENRES], x="genre", y="avg_daily_views", color="day_type", barmode="group",
+                color_discrete_sequence=[ACCENT, "#F3A712"], title="Average views per day by genre",
+            )),
+            width="stretch", key="br10_week",
+        )
 
 
 # ------------------------------------------------------------------ Data engineering

@@ -56,6 +56,7 @@ def create_spark(
     # UTC session time zone: naive raw timestamps are UTC, and ISO values with offsets convert to UTC.
     builder = (
         SparkSession.builder.appName(app_name)
+        .master(f"local[{os.getenv('SPARK_LOCAL_CORES', '8')}]")  # 20 parallel tasks (local[*]) ran the 8 GB demo VM out of memory
         .config("spark.sql.session.timeZone", "UTC")
         .config("spark.sql.shuffle.partitions", "16")  # the default 200 is far too many for this data size
         # Takes effect when this process starts the JVM: the default 1 GB heap runs out while writing the
@@ -197,7 +198,7 @@ def peer_low_engagement(movie_performance: DataFrame) -> tuple[DataFrame, DataFr
         F.when(low_views & low_completion, rules.REASON_BOTH)
         .when(low_views, rules.REASON_LOW_VIEWS)
         .when(low_completion, rules.REASON_LOW_COMPLETION),  # null = not flagged
-    ).cache()
+    )  # not cached: the 1.5 GB heap of the demo stack has no room for extra in-memory copies
     priority = F.create_map(*[item for reason, value in rules.REASON_PRIORITY.items() for item in (F.lit(reason), F.lit(value))])
     flagged = (
         scored.where(F.col("reason").isNotNull())
@@ -231,7 +232,6 @@ def peer_low_engagement(movie_performance: DataFrame) -> tuple[DataFrame, DataFr
 def user_segment_tables(users: DataFrame, user_engagement: DataFrame) -> tuple[DataFrame, DataFrame, DataFrame, DataFrame]:
     """BR9: quantile thresholds, the engagement table with segments, segment totals, agreement matrix."""
     spark = users.sparkSession
-    user_engagement = user_engagement.persist()  # read by the threshold, segment and agreement queries
     percentiles = (rules.SEGMENT_LOW_PERCENTILE, rules.SEGMENT_HIGH_PERCENTILE)
     population = user_engagement.count()
     cuts = [
@@ -280,7 +280,7 @@ def user_segment_tables(users: DataFrame, user_engagement: DataFrame) -> tuple[D
 
 def view_trends(movies: DataFrame, joined: DataFrame) -> tuple[DataFrame, DataFrame, DataFrame]:
     """BR10 (Spark twin of `batch_processing.view_trends`)."""
-    watched = joined.select("watch_id", "movie_id", "genre", F.to_date("watch_timestamp").alias("day")).persist()
+    watched = joined.select("watch_id", "movie_id", "genre", F.to_date("watch_timestamp").alias("day"))
     span = watched.agg(F.min("day").alias("first_day"), F.max("day").alias("last_day"))
     calendar = span.select(F.explode(F.expr("sequence(first_day, last_day, interval 1 day)")).alias("day"))
     counts = watched.groupBy("genre", "day").agg(F.count(F.lit(1)).alias("views"))

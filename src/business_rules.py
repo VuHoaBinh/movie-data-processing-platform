@@ -28,6 +28,12 @@ ALL_GENRES = "All genres"
 WEEKDAY, WEEKEND = "Weekday", "Weekend"
 
 
+# Manager alerts on the dashboard (docs/business_requirements.md section 2.3 gives the reason for each limit).
+INACTIVE_SHARE_LIMIT = 0.30  # the Inactive segment is the quietest quarter by construction; above 30% many users share one low count
+FLAGGED_SHARE_LIMIT = 0.25  # two bottom-decile tests flag about a fifth of the catalogue; above 25% something beyond the tails is wrong
+GENRE_DROP_ALERT = 0.10  # a genre whose last 7 days of views fell more than 10% against the 7 days before
+
+
 def nearest_rank_position(count: int, percent: int) -> int:
     """1-based position of the nearest-rank percentile in a sorted list of `count` values.
 
