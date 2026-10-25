@@ -10,6 +10,16 @@ from tests.helpers import pandas_tables, records, spark_tables
 #   M2: 34 views (2 viewers), 470 min, 1 rating 2.0      -> weighted (1*2.0 + 2*C)/3 = 3.22
 #   M3: 12 views (2 viewers), 175 min, 2 ratings avg 4.5 -> weighted (2*4.5 + 2*C)/4 = 4.17
 #   M4: no views, no ratings
+# Rules added for BR2/BR8/BR9/BR10 (reference date = latest watch date 2026-01-04; 2026-01-01 is a Thursday):
+#   growth (BR2): all 50 views fall in the last 7 days; movies need >= 10 recent views, so M1 (4) is out;
+#     M2 34/(0+10) = 3.4, M3 12/(0+10) = 1.2.
+#   peers (BR8): Action = {M1: 4 views, M2: 34}, Drama = {M3: 12, M4: 0}. Genre p10 views is the smaller value
+#     (nearest rank: ceil(2*10/100) = 1st of 2): Action 4, Drama 0 -> M1 and M4 are low_views. Completion needs
+#     >= 5 views, so only M2 (13.8) and M3 (29.2) qualify and each is the p10 of its own genre -> low_completion.
+#   quantiles (BR9): views per user sorted 0, 3, 11, 36; p25 = 1st value = 0, p75 = 3rd value = 11
+#     -> Inactive <= 0 (U4), Casual <= 11 (U2, U3), Active > 11 (U1). Profiles: U3 is labelled Active in the CSV.
+#   weekday/weekend (BR10): Thu 01-01 and Fri 01-02 are weekdays, Sat 01-03 and Sun 01-04 the weekend.
+#   The 7-day moving average is empty everywhere: the series has only 4 days.
 EXPECTED = {
     "movie_performance": [
         ("M1", "Alpha", "Action", 2020, 100, 4, 2, 4.0, 3, 3.93, 3.7, 55.0),
@@ -17,22 +27,40 @@ EXPECTED = {
         ("M3", "Gamma", "Drama", 2019, 50, 12, 2, 4.5, 2, 4.17, 2.9, 29.2),
         ("M4", "Delta", "Drama", 2022, 80, 0, 0, None, None, None, 0.0, None),
     ],
+    "trending_growth": [
+        ("M2", "Beta", "Action", 34, 0, 3.4, "2026-01-04"),
+        ("M3", "Gamma", "Drama", 12, 0, 1.2, "2026-01-04"),
+    ],
     "low_engagement_movies": [
+        ("M4", "Delta", "Drama", 0, None, 0, 29.2, "low_views", 2),
+        ("M1", "Alpha", "Action", 4, 55.0, 4, 13.8, "low_views", 2),
+        ("M3", "Gamma", "Drama", 12, 29.2, 0, 29.2, "low_completion", 3),
+        ("M2", "Beta", "Action", 34, 13.8, 4, 13.8, "low_completion", 3),
+    ],
+    "lowest_viewed_movies": [
         ("M4", "Delta", "Drama", 0, None),
         ("M1", "Alpha", "Action", 4, 55.0),
         ("M3", "Gamma", "Drama", 12, 29.2),
         ("M2", "Beta", "Action", 34, 13.8),
     ],
+    "genre_engagement_peers": [("Action", 2, 4, 13.8, 1, 1, 0, 2), ("Drama", 2, 0, 29.2, 1, 1, 0, 2)],
     "genre_popularity": [("Action", 38, 2), ("Drama", 12, 2)],
     "subscription_views": [("Basic", 36, 1), ("Premium", 3, 1), ("Standard", 11, 1)],
-    # U1: 36 views (Active); U2: 3 (Inactive); U3: 11 (Casual); U4: none (Inactive)
+    # U1: 36 views (Active); U2: 3 (Casual); U3: 11 (Casual); U4: none (Inactive)
     "user_engagement": [
         ("U1", "Basic", "Vietnam", 36, 540, 4, "Active"),
-        ("U2", "Premium", "Japan", 3, 160, 2, "Inactive"),
+        ("U2", "Premium", "Japan", 3, 160, 2, "Casual"),
         ("U3", "Standard", "Korea", 11, 165, 3, "Casual"),
         ("U4", "Basic", "Thailand", 0, 0, 0, "Inactive"),
     ],
-    "user_segments": [("Inactive", 2, 3), ("Casual", 1, 11), ("Active", 1, 36)],
+    "user_segments": [("Inactive", 1, 0), ("Casual", 2, 14), ("Active", 1, 36)],
+    "segment_thresholds": [(25, 0, 4), (75, 11, 4)],
+    # rows: activity_profile in the CSV (U1 Active, U2 Casual, U3 Active, U4 Inactive) x segment from views
+    "segment_agreement": [
+        ("Inactive", "Inactive", 1), ("Inactive", "Casual", 0), ("Inactive", "Active", 0),
+        ("Casual", "Inactive", 0), ("Casual", "Casual", 1), ("Casual", "Active", 0),
+        ("Active", "Inactive", 0), ("Active", "Casual", 1), ("Active", "Active", 1),
+    ],
     "user_preferences": [("U1", "Action|Drama"), ("U2", "Action"), ("U3", "Drama")],
     # BR3: every title in a user's favourite genres has been watched by that user (the only unwatched title,
     # M4, has no rating), so all lists are the popular filler: most views first, watched titles skipped.
@@ -51,6 +79,22 @@ EXPECTED = {
     ],
     # W9 is 12:00+07:00 = 05:00 UTC on 2026-01-03
     "daily_views": [("2026-01-01", 2, 1), ("2026-01-02", 3, 3), ("2026-01-03", 4, 3), ("2026-01-04", 41, 2)],
+    "genre_daily_views": [
+        ("2026-01-01", "Action", 2, None), ("2026-01-01", "Drama", 0, None),
+        ("2026-01-02", "Action", 2, None), ("2026-01-02", "Drama", 1, None),
+        ("2026-01-03", "Action", 2, None), ("2026-01-03", "Drama", 2, None),
+        ("2026-01-04", "Action", 32, None), ("2026-01-04", "Drama", 9, None),
+    ],
+    "movie_daily_views": [
+        ("M1", "2026-01-01", 2), ("M1", "2026-01-02", 1), ("M1", "2026-01-03", 1),
+        ("M2", "2026-01-02", 1), ("M2", "2026-01-03", 1), ("M2", "2026-01-04", 32),
+        ("M3", "2026-01-02", 1), ("M3", "2026-01-03", 2), ("M3", "2026-01-04", 9),
+    ],
+    "weekday_weekend_views": [
+        ("Action", "Weekday", 2, 4, 2.0), ("Action", "Weekend", 2, 34, 17.0),
+        ("All genres", "Weekday", 2, 5, 2.5), ("All genres", "Weekend", 2, 45, 22.5),
+        ("Drama", "Weekday", 2, 1, 0.5), ("Drama", "Weekend", 2, 11, 5.5),
+    ],
     "hourly_views": [(5, 1), (8, 32), (9, 9), (10, 3), (11, 2), (12, 1), (22, 1), (23, 1)],
     "summary_metrics": [(4, 4, 50, 6, 3.83)],
 }
@@ -68,8 +112,8 @@ def test_table_matches_hand_computed_values(tables, name):
     assert records(tables[name]) == EXPECTED[name]
 
 
-def test_all_eleven_tables_are_covered(tables):
-    assert set(tables) == set(EXPECTED) and len(EXPECTED) == 11
+def test_all_tables_are_covered(tables):
+    assert set(tables) == set(EXPECTED) and len(EXPECTED) == 19
 
 
 def test_ratings_in_range_and_bayesian_between_mean_and_raw(tables):

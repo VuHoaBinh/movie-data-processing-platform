@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src import batch_processing, data_quality, spark_batch_job
+from src import batch_processing, data_quality
 
 Tables = dict[str, pd.DataFrame]
 
@@ -16,6 +16,8 @@ def pandas_tables(raw_dir: Path, now: datetime | None = None) -> tuple[Tables, d
 
 
 def spark_tables(spark, raw_dir: Path, now: datetime | None = None) -> tuple[Tables, data_quality.Report]:
+    from src import spark_batch_job  # imported here so the Pandas tests also run where PySpark is absent
+
     frames, quality = spark_batch_job.curate(*spark_batch_job.read_raw(spark, raw_dir), now=now)
     tables = spark_batch_job.build_tables(*frames)
     report = data_quality.report_from_rows([tuple(row) for row in quality.collect()])

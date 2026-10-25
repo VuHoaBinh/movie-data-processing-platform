@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
 GENRE = "Action"
 USER = "U00001"
+MOVIE = "M00001"
 TOP_SHARE_ROWS = 6000
 
 
@@ -44,6 +45,13 @@ DASHBOARD_QUERIES: tuple[DashboardQuery, ...] = (
         "SELECT title, genre, views, avg_rating FROM top_viewed_movies WHERE bucket = 'all' LIMIT 10",
         "SELECT title, genre, views, avg_rating FROM analytics.movie_performance "
         "ORDER BY views DESC, movie_id LIMIT 10",
+    ),
+    DashboardQuery(
+        "trending_growth", "BR2", "range",
+        "SELECT movie_id, title, genre, views_recent, views_previous, growth "
+        "FROM trending_growth WHERE bucket = 'all' LIMIT 10",
+        "SELECT movie_id, title, genre, views_recent, views_previous, growth "
+        "FROM analytics.trending_growth ORDER BY growth DESC, movie_id LIMIT 10",
     ),
     DashboardQuery(
         "user_favorite_genres", "BR3", "point",
@@ -108,9 +116,31 @@ DASHBOARD_QUERIES: tuple[DashboardQuery, ...] = (
     ),
     DashboardQuery(
         "low_engagement", "BR8", "range",
-        "SELECT movie_id, title, genre, views, completion_rate FROM low_engagement_movies "
+        "SELECT movie_id, title, genre, views, completion_rate, reason FROM low_engagement_movies "
         "WHERE bucket = 'all' LIMIT 10",
-        "SELECT movie_id, title, genre, views, completion_rate FROM analytics.low_engagement_movies "
+        "SELECT movie_id, title, genre, views, completion_rate, reason FROM analytics.low_engagement_movies "
+        "ORDER BY priority, views, movie_id LIMIT 10",
+    ),
+    DashboardQuery(
+        "low_engagement_by_genre", "BR8", "range",
+        "SELECT movie_id, title, views, completion_rate, genre_views_p10, genre_completion_p10, reason "
+        "FROM low_engagement_by_genre WHERE genre = %s LIMIT 20",
+        "SELECT movie_id, title, views, completion_rate, genre_views_p10, genre_completion_p10, reason "
+        f"FROM analytics.low_engagement_movies WHERE genre = '{GENRE}' ORDER BY priority, views, movie_id LIMIT 20",
+        (GENRE,),
+    ),
+    DashboardQuery(
+        "genre_engagement_peers", "BR8", "range",
+        "SELECT genre, movies, views_p10, completion_p10, low_views, low_completion, low_both, flagged "
+        "FROM genre_engagement_peers",
+        "SELECT genre, movies, views_p10, completion_p10, low_views, low_completion, low_both, flagged "
+        "FROM analytics.genre_engagement_peers ORDER BY genre",
+    ),
+    DashboardQuery(
+        "lowest_viewed", "BR8", "range",
+        "SELECT movie_id, title, genre, views, completion_rate FROM lowest_viewed_movies "
+        "WHERE bucket = 'all' LIMIT 10",
+        "SELECT movie_id, title, genre, views, completion_rate FROM analytics.lowest_viewed_movies "
         "ORDER BY views ASC, title ASC, movie_id ASC LIMIT 10",
     ),
     DashboardQuery(
@@ -119,9 +149,37 @@ DASHBOARD_QUERIES: tuple[DashboardQuery, ...] = (
         "SELECT segment, users, views FROM analytics.user_segments ORDER BY segment",
     ),
     DashboardQuery(
+        "segment_thresholds", "BR9", "range",
+        "SELECT percentile, views_threshold, users FROM segment_thresholds WHERE bucket = 'all'",
+        "SELECT percentile, views_threshold, users FROM analytics.segment_thresholds ORDER BY percentile",
+    ),
+    DashboardQuery(
+        "segment_agreement", "BR9", "range",
+        "SELECT activity_profile, segment, users FROM segment_agreement WHERE bucket = 'all'",
+        "SELECT activity_profile, segment, users FROM analytics.segment_agreement "
+        "ORDER BY activity_profile, segment",
+    ),
+    DashboardQuery(
         "daily_views", "BR10", "range",
         "SELECT day, views, unique_viewers FROM daily_views WHERE bucket = 'all'",
         "SELECT day, views, unique_viewers FROM analytics.daily_views ORDER BY day",
+    ),
+    DashboardQuery(
+        "genre_daily_views", "BR10", "range",
+        "SELECT day, genre, views, views_ma7 FROM genre_daily_views WHERE bucket = 'all'",
+        "SELECT day, genre, views, views_ma7 FROM analytics.genre_daily_views ORDER BY day, genre",
+    ),
+    DashboardQuery(
+        "movie_daily_views", "BR10", "point",
+        "SELECT day, views FROM movie_daily_views WHERE movie_id = %s",
+        f"SELECT day, views FROM analytics.movie_daily_views WHERE movie_id = '{MOVIE}' ORDER BY day",
+        (MOVIE,),
+    ),
+    DashboardQuery(
+        "weekday_weekend", "BR10", "range",
+        "SELECT genre, day_type, days, views, avg_daily_views FROM weekday_weekend_views WHERE bucket = 'all'",
+        "SELECT genre, day_type, days, views, avg_daily_views FROM analytics.weekday_weekend_views "
+        "ORDER BY genre, day_type",
     ),
 )
 
