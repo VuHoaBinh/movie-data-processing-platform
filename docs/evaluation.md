@@ -13,7 +13,7 @@ Phần 7 liệt kê những gì **không** đo được hoặc chỉ là nhận 
 | C2 | Độ trễ truy vấn (query latency) | Thời gian một truy vấn dashboard trả đủ dòng | ms, p50/p95 | `benchmarks/storage_latency.py`: 200 lần (Cassandra), 20 lần (Spark SQL) sau warm-up |
 | C3 | Độ trễ kết quả stream (result latency) | Từ lúc kết thúc cửa sổ 10 s đến khi top-10 đúng của cửa sổ đó xuất hiện trong Cassandra | s, p50/p95 | `benchmarks/stream_latency.py`, mọi đồng hồ là của host |
 | C4 | Thông lượng (throughput) | Khối lượng xử lý trên đơn vị thời gian | sự kiện/s, truy vấn/s, hàng/s | burst 100k sự kiện; 250-8000 sự kiện/s; 8 luồng đọc Cassandra |
-| C5 | Thời gian chạy batch | Từ CSV thô đến các bảng dashboard (10 bảng ở `batch_engines`, 12 bảng analytics ở `load_times`) | s | `benchmarks/batch_engines.py` (3 lần ≤1M, 1 lần 5M), `load_times.py` |
+| C5 | Thời gian chạy batch | Từ CSV thô đến bảng dashboard (10 bảng khi đo `batch_engines`, 18 bảng từ sau BR2/BR8/BR9/BR10) | s | `benchmarks/batch_engines.py` (3 lần ≤1M, 1 lần 5M), `load_times.py` |
 | C6 | Khả năng mở rộng (scalability) | Thời gian và RAM tăng thế nào khi dữ liệu tăng 50 lần (100k→5M) | hệ số tăng, MB | cùng benchmark C5, RSS cả cây tiến trình lấy mẫu mỗi 0,5 s từ `/proc` |
 | C7 | Dung lượng lưu trữ | Kích thước trên đĩa của cùng dữ liệu | MB | `benchmarks/storage_footprint.py` |
 | C8 | Chịu lỗi (fault tolerance) | Cơ chế khôi phục khi tiến trình/node chết | định tính | **Không đo thực nghiệm** (xem phần 7); đánh giá theo cơ chế: replication, checkpoint, lưu offset |
@@ -33,7 +33,8 @@ Chạy: `python -m pytest` (host, cần Java) và `docker compose --profile tool
 
 | Kiểm thử | Nội dung | Kết quả |
 |---|---|---|
-| `test_fixture_tables.py` | Bộ dữ liệu 4 user / 4 movie / 50 lượt xem (có timestamp ISO có offset, đủ 3 segment, phim chưa ai xem); giá trị từng ô của 11 bảng (10 bảng gốc và `user_recommendations`) suy ra bằng tay, chạy trên cả Pandas và Spark | đạt |
+| `test_fixture_tables.py` | Bộ dữ liệu 4 user / 4 movie / 50 lượt xem (có timestamp ISO có offset, đủ 3 segment, phim chưa ai xem); giá trị từng ô của 18 bảng suy ra bằng tay (tăng trưởng, ngưỡng đồng đẳng và `reason`, phân vị nearest-rank, ma trận đối chiếu `activity_profile`, ngày thường / cuối tuần), chạy trên cả Pandas và Spark | đạt |
+| `test_fixture_peer_tables.py`, `test_trends.py` | Bộ dữ liệu thứ hai (13 phim Comedy + 2 phim Drama chưa ai xem, ngày tham chiếu 2026-03-15) tính tay: cửa sổ tăng trưởng 7+7 ngày và sàn 10 lượt, hoà, ngưỡng p10 theo thể loại với ô đúng ngưỡng, thể loại không phim nào đủ 5 lượt, lưới thể loại × ngày đủ ô, trung bình trượt 7 ngày (8,14 và 20,43), chuỗi từng phim; `dense_series` dùng cùng định nghĩa trung bình trượt | đạt |
 | `test_parity.py` | Pandas và Spark cho **11 bảng giống hệt** và cùng số dòng bị loại trên fixture, dữ liệu sạch, dữ liệu bẩn và dữ liệu thưa; cờ `--csv-output-dir` tương thích. Bảng ALS chỉ có ở Spark nên nằm ngoài so sánh này | đạt |
 | `test_recommendations.py` | BR3: bộ dữ liệu thứ hai (4 user, 8 phim) suy tay danh sách gợi ý của cả hai engine, gồm hoà điểm, phim bù theo độ phổ biến và user cold start; không có phim đã xem nào trong danh sách trên dữ liệu sạch, bẩn và thưa (cả Pandas lẫn Spark); mọi user có đủ 10 phim; ALS: đủ 10 hạng, không có phim đã xem, **hai lần chạy cùng seed cho kết quả giống hệt**, đổi seed thì kết quả đổi | đạt |
 | `test_data_quality.py` | 7 luật (trùng id, timestamp không parse được, null, giá trị sai, timestamp tương lai, mồ côi user/movie — các dòng mồ côi sẽ bị mất âm thầm ở phép join nếu không đếm) với thứ tự ưu tiên; `--dirty-rate` chèn dòng bẩn thì số dòng bị loại **bằng đúng** số đã chèn | đạt |
@@ -63,7 +64,7 @@ so với giá trị kỳ vọng do producer tính (cột `windows_exact`), trừ
 
 ### 3.1 Batch: Pandas và Spark (C5, C6) — `benchmarks/results/batch_engines.md`
 
-Dữ liệu sinh vào thư mục tạm, users 50k, movies 20k, ratings = watches / 2. Toàn bộ: đọc CSV → làm sạch → 10 bảng → ghi CSV.
+Dữ liệu sinh vào thư mục tạm, users 50k, movies 20k, ratings = watches / 2. Toàn bộ: đọc CSV → làm sạch → 10 bảng → ghi CSV. Phép đo này làm trước khi thêm 8 bảng của BR2/BR8/BR9/BR10 (hiện 18 bảng, trong đó `movie_daily_views` có thêm một lần gom nhóm theo (phim, ngày)); thời gian của hai engine chưa đo lại cho 18 bảng.
 
 | Số dòng watch | Pandas (s) | Spark (s) | RAM đỉnh Pandas (MB) | RAM đỉnh Spark (MB) | Đầu ra giống nhau |
 |---|---|---|---|---|---|
@@ -169,6 +170,13 @@ Cách đọc (mọi nhận xét dưới đây là về bộ dữ liệu sinh, n�
 | BR9 | Manager | Phân khúc người dùng | Manager › BR9 | segments cover all users exactly once | 50,000 users in 3 segments | yes | 1.8 |
 | BR10 | Manager | Xu hướng theo ngày | Manager › BR10 | daily series has one point per day and adds up to total views | 180 days, 1,000,000 views | yes | 2.6 |
 
+Các tiêu chí mới của BR2 (danh sách đang lên), BR8 (so với nhóm đồng đẳng), BR9 (ngưỡng phân vị, mức khớp) và BR10 (lưới thể loại, trung bình trượt, chuỗi từng phim, ngày thường / cuối tuần) đã được thêm vào `benchmarks/br_effectiveness.py`; bảng trên là kết quả của lần chạy trước khi thêm chúng, nên các hàng mới sẽ xuất hiện sau lần chạy tiếp theo trên stack. Các số liệu tính độc lập bằng Pandas từ cùng CSV:
+
+* **BR9, mức khớp giữa phân khúc theo phân vị (p25 = 7, p75 = 37 lượt xem) và nhãn `activity_profile` của bộ sinh: 80,96%** (40.482/50.000 user), so với 70,55% của ngưỡng cố định 10/35 cũ. Ma trận nhầm lẫn (hàng: nhãn của bộ sinh; cột: phân khúc suy ra từ lượt xem): Inactive → 9.464 / 495 / 0; Casual → 3.646 / 18.783 / 0; Active → 0 / 5.377 / 12.235 (Inactive / Casual / Active). Mọi sai lệch chỉ lệch một bậc. Cặp phân vị 33/67 cho 80,7%, 20/80 cho 76,6%, 20/65 (khớp tỉ lệ nhãn 20/45/35 của bộ sinh, cần biết trước nhãn) cho 93,4%.
+* **BR8, so với nhóm đồng đẳng:** gắn cờ 4.171/20.000 phim (485-579 phim mỗi thể loại, 19,4%-23,2%), trong khi 10 phim ít xem nhất không xét thể loại gồm 8 phim Horror và 2 phim Animation.
+* **BR2, danh sách đang lên:** 460/20.000 phim đủ sàn 10 lượt xem trong 7 ngày cuối (ngày tham chiếu 2026-09-27); top 10 có tối thiểu 14 lượt xem gần đây, trung bình 22,2, so với 7,2 nếu xếp theo tỉ lệ `recent/previous` thô.
+* **BR10, ngày thường so với cuối tuần:** 5.552,1 so với 5.564,1 lượt xem mỗi ngày (+0,2%).
+
 Thời gian truy vấn đo khi máy đang chạy cả stack streaming nên dao động (BR6 quét 50k dòng sáu cột: 485,0 ms ở lần đo này, 3.795,5 ms ở lần đo trước khi máy đang bận hơn; 382 ms cho truy vấn một cột ở phần 3.2 khi máy rảnh). Với BR3 `query_ms` là thời gian trung bình mỗi user (một truy vấn một partition). Chưa đo thời gian render của Streamlit và chưa có khảo sát người dùng thật: "hiệu quả ứng dụng" ở đây là đúng + đủ + nhanh của dữ liệu phục vụ từng màn hình.
 
 ## 5. Chi phí và vận hành: số liệu thực tế
@@ -183,7 +191,7 @@ Thời gian truy vấn đo khi máy đang chạy cả stack streaming nên dao �
 
 | Tiêu chí | Cassandra | Hive/Parquet (Spark SQL) | Bằng chứng |
 |---|---|---|---|
-| C1 Đúng đắn | 5 | 5 | 12/12 truy vấn trả kết quả giống nhau |
+| C1 Đúng đắn | 5 | 5 | 21/21 truy vấn trả kết quả giống nhau |
 | C2 Độ trễ truy vấn khoá | 5 | 1 | 1-2 ms so với 240-650 ms |
 | C2 Độ trễ quét lớn / ad hoc | 3 | 4 | hòa ở 50k dòng; chỉ Hive làm được ad hoc |
 | C4 Thông lượng | 4 | 2 | 1.389 qps (cận dưới) so với ~4 qps tuần tự (1/0,25 s) |

@@ -12,10 +12,11 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from benchmarks.common import write_results
-from src import batch_processing
+from src import batch_processing, business_rules as rules
 from src.cassandra_store import connect, query_frame
 
 TOP_SHARE = 0.30
@@ -39,6 +40,7 @@ def main() -> None:
     args = parser.parse_args()
 
     curated, _ = batch_processing.curate(*batch_processing.read_raw(args.raw_dir))
+    watches = curated[3]
     expected = batch_processing.build_tables(*curated)
     performance = expected["movie_performance"]
     session = connect()
@@ -72,6 +74,29 @@ def main() -> None:
     age = (datetime.now(timezone.utc) - pd.Timestamp(live["window_start"].max()).tz_localize("UTC")).total_seconds() / 60 if not live.empty else math.inf
     check(rows, "BR2", "Viewer", "live window has ranks 1..10 and is < 10 min old",
           f"{len(live)} rows, newest window {age:.1f} min old", sorted(live.get("rank", [])) == list(range(1, 11)) and age < 10, ms)
+
+    # BR2 rising now: stored ranking equals an independent computation from the curated watch events.
+    days = watches["watch_timestamp"].dt.normalize()
+    latest = days.max()
+    age = (latest - days).dt.days
+    recent = watches[age < rules.TREND_WINDOW_DAYS]["movie_id"].value_counts().rename("recent")
+    previous = watches[(age >= rules.TREND_WINDOW_DAYS) & (age < 2 * rules.TREND_WINDOW_DAYS)]["movie_id"].value_counts().rename("previous")
+    board = pd.concat([recent, previous], axis=1).fillna(0)
+    ranked = board[board["recent"] >= rules.TREND_MIN_RECENT_VIEWS].copy()
+    ranked["growth"] = (ranked["recent"] - ranked["previous"]) / (ranked["previous"] + rules.TREND_DAMPING)
+    ranked = ranked.sort_index().sort_values("growth", ascending=False, kind="stable")
+    rising, ms = timed(session, "SELECT movie_id, views_recent, views_previous, growth, reference_date FROM trending_growth WHERE bucket = 'all' LIMIT 10")
+    same_ids = rising["movie_id"].tolist() == ranked.head(10).index.tolist()
+    check(rows, "BR2", "Viewer", f"rising-now top-10 equals an independent growth ranking (reference date {latest.date()})",
+          f"{same_ids}; best growth {rising['growth'].iloc[0]:.3f} ({int(rising['views_recent'].iloc[0])} vs {int(rising['views_previous'].iloc[0])} views)",
+          same_ids and str(rising["reference_date"].iloc[0]) == str(latest.date()), ms)
+    naive = (board["recent"] / board["previous"].clip(lower=1)).sort_values(ascending=False, kind="stable").head(10)
+    damped_recent = float(rising["views_recent"].mean())
+    naive_recent = float(board.loc[naive.index, "recent"].mean())
+    check(rows, "BR2", "Viewer", "volume floor + damping keep tiny titles out of the top-10 (vs a naive recent/previous ratio)",
+          f"mean recent views {damped_recent:.1f} vs {naive_recent:.1f} for the naive ratio; min {int(rising['views_recent'].min())}; "
+          f"{len(ranked)} of {len(performance):,} movies pass the floor",
+          rising["views_recent"].min() >= rules.TREND_MIN_RECENT_VIEWS and damped_recent > naive_recent, ms)
 
     # BR3: lists are complete, never contain a watched title and match the independent Pandas computation.
     watched = set(zip(curated[3]["user_id"], curated[3]["movie_id"]))
@@ -156,23 +181,95 @@ def main() -> None:
           f"{len(top_share):,} movies, min views {int(top_share['views'].min())}",
           len(top_share) == n_top and top_share["views"].min() >= performance["views"].quantile(0.69), ms)
 
-    # BR8: lowest-engagement list equals Pandas and includes never-watched movies.
-    low, ms = timed(session, "SELECT movie_id, views FROM low_engagement_movies WHERE bucket = 'all' LIMIT 10")
+    # BR8: peer-relative low engagement. The stored list must follow the rule and every genre must be covered.
+    peers, ms_peers = timed(session, "SELECT genre, movies, views_p10, completion_p10, low_views, low_completion, low_both, flagged FROM genre_engagement_peers")
+    listed, ms = timed(session, "SELECT movie_id, genre, views, completion_rate, reason FROM low_engagement_movies WHERE bucket = 'all' LIMIT 10")
     reference = expected["low_engagement_movies"].head(10)
-    check(rows, "BR8", "Manager", "10 lowest-viewed titles equal the Pandas list",
-          f"views {low['views'].tolist()}", low["movie_id"].tolist() == reference["movie_id"].tolist(), ms)
+    check(rows, "BR8", "Manager", "top-10 of the peer-relative list equals the Pandas list",
+          f"reasons {sorted(set(listed['reason']))}", listed["movie_id"].tolist() == reference["movie_id"].tolist(), ms)
+    by_genre = {}
+    started = time.perf_counter()
+    for genre in sorted(peers["genre"]):
+        by_genre[genre] = query_frame(session, "SELECT movie_id, views, completion_rate, reason FROM low_engagement_by_genre WHERE genre = %s", [genre])
+    genre_ms = (time.perf_counter() - started) * 1000
+    peer_table = peers.set_index("genre")
+    consistent = all(len(frame) == peer_table.loc[genre, "flagged"] for genre, frame in by_genre.items())
+    ruled = all(
+        ((frame["views"] <= peer_table.loc[genre, "views_p10"])
+         | ((frame["views"] >= rules.PEER_MIN_VIEWS_FOR_COMPLETION) & (frame["completion_rate"] <= peer_table.loc[genre, "completion_p10"]))).all()
+        for genre, frame in by_genre.items()
+    )
+    shares = peers["flagged"] / peers["movies"]
+    check(rows, "BR8", "Manager", "every genre has flagged titles that satisfy the peer rule; stored counts add up (8 genre partitions)",
+          f"{int(peers['flagged'].sum()):,} of {int(peers['movies'].sum()):,} titles; per-genre share {shares.min():.1%}-{shares.max():.1%}",
+          consistent and ruled and (peers["flagged"] > 0).all() and int(peers["flagged"].sum()) == len(expected["low_engagement_movies"]), genre_ms)
+    lowest, ms = timed(session, "SELECT movie_id, genre, views FROM lowest_viewed_movies WHERE bucket = 'all' LIMIT 10")
+    mix = lowest["genre"].value_counts()
+    check(rows, "BR8", "Manager", "baseline: the 10 lowest-viewed titles (no peers) equal the Pandas list",
+          f"{mix.iloc[0]} of 10 are {mix.index[0]} ({', '.join(f'{genre} {int(n)}' for genre, n in mix.items())})",
+          lowest["movie_id"].tolist() == expected["lowest_viewed_movies"].head(10)["movie_id"].tolist(), ms)
 
-    # BR9: segments partition all users.
+    # BR9: quantile segments partition all users; thresholds equal numpy's inverted-CDF (nearest-rank) quantiles.
     segments, ms = timed(session, "SELECT segment, users, views FROM user_segments")
     check(rows, "BR9", "Manager", "segments cover all users exactly once",
           f"{int(segments['users'].sum()):,} users in {len(segments)} segments",
           int(segments["users"].sum()) == len(expected["user_engagement"]) and len(segments) == 3, ms)
+    cuts, ms = timed(session, "SELECT percentile, views_threshold, users FROM segment_thresholds WHERE bucket = 'all'")
+    user_views = expected["user_engagement"]["views"].to_numpy()
+    oracle = [int(np.percentile(user_views, percent, method="inverted_cdf")) for percent in cuts["percentile"]]
+    check(rows, "BR9", "Manager", "stored thresholds equal independent nearest-rank quantiles of views per user",
+          f"p{cuts['percentile'].tolist()} = {cuts['views_threshold'].tolist()} views", cuts["views_threshold"].tolist() == oracle, ms)
+    matrix, ms = timed(session, "SELECT activity_profile, segment, users FROM segment_agreement WHERE bucket = 'all'")
+    agreement = matrix.loc[matrix["activity_profile"] == matrix["segment"], "users"].sum() / matrix["users"].sum()
+    fixed = np.where(user_views <= 10, "Inactive", np.where(user_views <= 35, "Casual", "Active"))
+    profile = expected["user_engagement"][["user_id"]].merge(curated[0][["user_id", "activity_profile"]], on="user_id")["activity_profile"].to_numpy()
+    fixed_agreement = float((fixed == profile).mean())
+    check(rows, "BR9", "Manager", "segments agree with the generator's activity_profile (confusion matrix, quantile vs former fixed 10/35)",
+          f"{agreement:.2%} agreement vs {fixed_agreement:.2%} with fixed thresholds; "
+          "matrix (profile -> Inactive/Casual/Active users): " + "; ".join(
+              f"{profile} -> " + "/".join(f"{int(matrix[(matrix['activity_profile'] == profile) & (matrix['segment'] == segment)]['users'].iloc[0]):,}" for segment in rules.SEGMENTS)
+              for profile in rules.SEGMENTS),
+          matrix["users"].sum() == len(expected["user_engagement"]) and len(matrix) == 9 and agreement > fixed_agreement, ms)
+    sensitivity = []
+    for low_percent, high_percent in ((25, 75), (33, 67), (20, 80), (20, 65)):
+        low_value, high_value = (int(np.percentile(user_views, q, method="inverted_cdf")) for q in (low_percent, high_percent))
+        alt = np.where(user_views <= low_value, "Inactive", np.where(user_views <= high_value, "Casual", "Active"))
+        sensitivity.append(f"p{low_percent}/p{high_percent} ({low_value}/{high_value} views) {float((alt == profile).mean()):.1%}")
+    check(rows, "BR9", "Manager", "sensitivity of the agreement to the chosen quantile pair (information only)",
+          "; ".join(sensitivity), True, 0.0)
 
-    # BR10: one point per day, daily views add up.
+    # BR10: genre x day grid, per-day sums, moving average, per-movie series, weekday vs weekend.
     daily, ms = timed(session, "SELECT day, views FROM daily_views WHERE bucket = 'all'")
     check(rows, "BR10", "Manager", "daily series has one point per day and adds up to total views",
           f"{len(daily)} days, {int(daily['views'].sum()):,} views",
           len(daily) == len(expected["daily_views"]) and int(daily["views"].sum()) == int(summary), ms)
+    grid, ms = timed(session, "SELECT day, genre, views, views_ma7 FROM genre_daily_views WHERE bucket = 'all'")
+    per_day = grid.groupby("day")["views"].sum().sort_index()
+    check(rows, "BR10", "Manager", "genre x day grid is complete (days x genres) and its per-day sums equal the daily series",
+          f"{len(grid):,} rows = {grid['day'].nunique()} days x {grid['genre'].nunique()} genres",
+          len(grid) == len(daily) * len(genres) and per_day.tolist() == daily.sort_values("day")["views"].tolist(), ms)
+    last_genre = grid[grid["genre"] == genres[0]].sort_values("day")
+    manual = round(float(last_genre["views"].tail(rules.MOVING_AVERAGE_DAYS).mean()), 2)
+    check(rows, "BR10", "Manager", f"7-day moving average of the last day equals a manual mean ({genres[0]})",
+          f"{last_genre['views_ma7'].iloc[-1]} vs {manual}; first {rules.MOVING_AVERAGE_DAYS - 1} days empty: {bool(last_genre['views_ma7'].head(rules.MOVING_AVERAGE_DAYS - 1).isna().all())}",
+          abs(last_genre["views_ma7"].iloc[-1] - manual) < 1e-9 and last_genre["views_ma7"].head(rules.MOVING_AVERAGE_DAYS - 1).isna().all(), ms)
+    sample = random.Random(10).sample(sorted(performance["movie_id"]), args.sample_users)
+    totals = performance.set_index("movie_id")["views"]
+    series_ok, total_ms = 0, 0.0
+    for movie in sample:
+        series, ms = timed(session, "SELECT day, views FROM movie_daily_views WHERE movie_id = %s", [movie])
+        total_ms += ms
+        series_ok += int((int(series["views"].sum()) if not series.empty else 0) == totals[movie])
+    check(rows, "BR10", "Manager", f"per-movie daily series adds up to the movie's views ({args.sample_users} random movies, 1 partition each)",
+          f"{series_ok}/{len(sample)} movies OK; sparse table holds {len(expected['movie_daily_views']):,} rows "
+          f"(a dense grid would be {len(performance) * len(daily):,})", series_ok == len(sample), total_ms / len(sample))
+    split, ms = timed(session, "SELECT genre, day_type, days, views, avg_daily_views FROM weekday_weekend_views WHERE bucket = 'all'")
+    overall = split[split["genre"] == rules.ALL_GENRES].set_index("day_type")
+    uplift = overall.loc[rules.WEEKEND, "avg_daily_views"] / overall.loc[rules.WEEKDAY, "avg_daily_views"] - 1
+    check(rows, "BR10", "Manager", "weekday + weekend views add up to total views; weekend uplift per day is reported",
+          f"weekday {overall.loc[rules.WEEKDAY, 'avg_daily_views']}/day over {int(overall.loc[rules.WEEKDAY, 'days'])} days, "
+          f"weekend {overall.loc[rules.WEEKEND, 'avg_daily_views']}/day over {int(overall.loc[rules.WEEKEND, 'days'])} days ({uplift:+.1%})",
+          int(overall["views"].sum()) == int(summary) and len(split) == 2 * (len(genres) + 1), ms)
 
     write_results(
         "br_effectiveness", rows, "Business-requirement success criteria measured on the running stack",

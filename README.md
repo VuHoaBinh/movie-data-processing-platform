@@ -35,15 +35,15 @@ tables as CSV.
 | BR | Requirement | Implementation |
 |---|---|---|
 | BR1 | Movie Search & Filtering | Viewer searches titles and filters by genre from the movie catalogue. |
-| BR2 | Trending Movie Detection | Viewer sees popular movies and the latest five-minute Kafka/Flink window. |
+| BR2 | Trending Movie Detection | Viewer sees all-time popular movies, titles rising now (batch: last 7 days vs the 7 days before, with a volume floor and damping) and the latest five-minute Kafka/Flink window. |
 | BR3 | Personalized Movie Recommendation | Viewer gets ten unwatched titles, precomputed per user: genre-based (best-rated titles in their top two watched genres, popular titles as filler) or Spark MLlib ALS (similar viewers); the page lets the viewer pick the recommender (ALS is the default, genre-based the alternative and the fallback for users without watch history). |
 | BR4 | Movie Rating Analytics | Analyst sees the overall rating metric and highest-rated movies with rating counts. |
 | BR5 | Genre Popularity Analysis | Analyst compares views and unique viewers by genre (two charts and a table with views per viewer). |
 | BR6 | User Engagement Analysis | Analyst reviews views, watch minutes and active days per user (KPI cards with mean and median, three histograms, filters by plan and region), subscription usage and viewing hours. |
 | BR7 | Movie Performance Analysis | Analyst compares views, rating, completion rate, and watch hours. |
-| BR8 | Low-Engagement Movie Detection | Manager sees the ten lowest-viewed titles; movies with zero views are included. |
-| BR9 | User Segmentation | Manager views Inactive, Casual, and Active user counts, including users with no views. |
-| BR10 | Time-Based Movie Trend Analysis | Manager views daily viewing trends; analyst can also inspect hourly activity. |
+| BR8 | Low-Engagement Movie Detection | Manager sees titles that are low relative to their genre peers (views at or below the genre p10, or completion at or below the genre p10), with the reason and per-genre counts; never-watched titles are included. |
+| BR9 | User Segmentation | Manager views Inactive, Casual, and Active user counts from quantile thresholds (p25/p75 of views per user, stored and shown), including users with no views, plus the agreement with the generator's `activity_profile`. |
+| BR10 | Time-Based Movie Trend Analysis | Manager views daily views per genre and per movie, a 7-day moving average and a weekday vs weekend comparison; analyst can also inspect hourly activity. |
 
 BR2 uses a Flink event-time window over Kafka watch events. For the local demo,
 a producer continuously replays CSV history into Kafka with current event
@@ -76,6 +76,9 @@ Flink UI at `http://localhost:8081`; Cassandra is on `localhost:9042`.
   starts the Spark batch **in the background** (status shown in the sidebar); "Refresh batch (Spark)"
   does the same on demand.
 * Stop with `Ctrl+C`, then `docker compose down` (add `-v` to also drop the Cassandra volume).
+* `CREATE TABLE IF NOT EXISTS` does not alter an existing table: a Cassandra volume created before the BR8 upgrade
+  still holds the old `low_engagement_movies` (bucket / views / title key). Drop the volume (`docker compose down -v`)
+  before the first run of this version; the batch rebuilds every serving table.
 
 The compose setup is a single-machine demo: one Kafka broker/partition, one Flink TaskManager, one
 Cassandra node (RF=1).
@@ -109,7 +112,7 @@ $env:CASSANDRA_HOST = "localhost"; streamlit run app.py
 ```
 
 Spark batch flags: `--warehouse-dir` (Hive location, default `data/warehouse`), `--no-hive`,
-`--cassandra-host` (default `$CASSANDRA_HOST`), `--csv-output-dir` (optional CSV copy of the analytics tables),
+`--cassandra-host` (default `$CASSANDRA_HOST`), `--csv-output-dir` (optional CSV copy of the 19 analytics tables),
 `--no-als` (skip the ALS recommendations, which add training time to the batch).
 
 ## Tests, data quality and benchmarks
@@ -124,9 +127,11 @@ docker compose --profile tools run --rm --no-deps -e RUN_HIVE_TESTS=1 benchmark 
 ```
 
 * `tests/test_fixture_tables.py` - a hand-made 4-user / 4-movie / 50-view dataset with the expected value of
-  every cell of the 11 tables derived by hand, run against both engines.
-* `tests/test_parity.py` - Pandas and Spark produce exactly the same 11 tables (and rejected-row counts) on the
-  fixture and on generated clean / dirty / sparse data. The ALS table is Spark only and is not part of the parity.
+  every cell of the 19 tables derived by hand, run against both engines. `tests/test_fixture_peer_tables.py` adds a
+  second hand-made dataset (13 Comedy + 2 Drama titles over 3 weeks) for the growth windows, genre-peer thresholds and
+  the 7-day moving average.
+* `tests/test_parity.py` - Pandas and Spark produce exactly the same 19 tables (and rejected-row counts) on the
+  fixture, the peer dataset and generated clean / dirty / sparse data. The ALS table is Spark only and is not part of the parity.
 * `tests/test_recommendations.py` - BR3: a second hand-derived dataset (genre ties, filler, cold start), no watched
   title in any list on generated data (both engines), and the ALS tests (ten ranks per user, no watched title,
   identical output on a second run with the same seed).

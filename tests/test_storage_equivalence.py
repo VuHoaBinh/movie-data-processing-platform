@@ -21,8 +21,15 @@ pytestmark = [pytest.mark.integration, pytest.mark.spark]
 def hive():
     if not os.getenv("RUN_HIVE_TESTS"):
         pytest.skip("set RUN_HIVE_TESTS=1 (inside the Docker stack) to query the Hive warehouse")
+    from pyspark.sql import SparkSession
+
     from src.spark_batch_job import create_spark
 
+    # getOrCreate() would hand back the Hive-less session the other tests share (or one that
+    # `spark_batch_job.run` already stopped), so start from a clean slate.
+    shared = SparkSession.getActiveSession()
+    if shared is not None:
+        shared.stop()
     session = create_spark(Path(os.getenv("WAREHOUSE_DIR", "data/warehouse")), app_name="tests-hive")
     yield session
     session.stop()
