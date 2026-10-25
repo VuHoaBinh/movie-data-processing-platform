@@ -129,6 +129,8 @@ docker compose --profile tools run --rm --no-deps -e RUN_HIVE_TESTS=1 benchmark 
   demonstrated; `--out-dir` also keeps experiments away from `data/`.
 * `tests/test_cassandra_counts.py`, `tests/test_storage_equivalence.py` - Cassandra row counts match the
   batch output and both stores answer every dashboard query identically.
+* `python -m src.profile_data` profiles the raw CSVs (`benchmarks/results/data_profile.md` / `.csv`, tested in
+  `tests/test_profile_data.py`); `python -m src.data_quality` reports rejected rows on them.
 * `benchmarks/` - `batch_engines` (Pandas vs Spark at 100k/1M/5M), `storage_latency` (Cassandra vs
   Hive/Parquet), `stream_latency` (Flink vs Spark Structured Streaming), `load_times`, `storage_footprint`,
   `br_effectiveness`. Results are committed in `benchmarks/results/`; the analysis is in
@@ -141,10 +143,13 @@ data/                        Raw CSV input
 data/warehouse/              Hive warehouse + Derby metastore (generated, git-ignored)
 sql/cassandra_schema.cql     Cassandra keyspace and per-query tables
 docs/storage_decision.md     ADR: why Cassandra + Hive/Parquet (Vietnamese)
+docs/business_requirements.md Business context, stakeholders, BR1-BR10 rationale and traceability (Vietnamese)
+docs/data_characteristics.md Data sources, schema, Big Data characteristics, design consequences (Vietnamese)
 src/spark_batch_job.py       Spark batch: lake zones, dashboard tables, Cassandra load
 src/batch_processing.py      Pandas twin of the batch pipeline (CSV output)
 src/cassandra_store.py       Cassandra connection / schema helper
 src/data_quality.py          Cleaning rules + rejected-row report (Pandas and Spark)
+src/profile_data.py          Data profiler: sizes, nulls, keys, skew, time pattern (writes benchmarks/results/data_profile.*)
 src/trending_materializer.py Kafka result -> Cassandra live_trending
 src/spark_streaming_trending.py Spark Structured Streaming alternative to Flink
 src/dashboard_queries.py     Dashboard queries as CQL and Spark SQL (storage comparison)

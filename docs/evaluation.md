@@ -69,7 +69,7 @@ Dữ liệu sinh vào thư mục tạm, users 50k, movies 20k, ratings = watches
 | 5M | 31,5 | 104,7 | 2192 | 4393 | có |
 
 * Với dữ liệu ≤ 5M trên một máy, **Pandas nhanh hơn Spark 3-6 lần**; Spark mất ~50 s cố định (khởi động JVM, lập kế hoạch, shuffle).
-* Hệ số tăng khi dữ liệu tăng 50 lần: Pandas ×3,2 thời gian, ×11 RAM (≈0,45 GB/1M dòng watch ⇒ ~16M dòng là hết 8 GB); Spark ×1,9 thời gian, RAM bị chặn bởi heap 4 GB (spill ra đĩa) nên mở rộng được vượt RAM — nhưng chỉ đo tới 5M, nên "mở rộng ngang" là suy luận, không phải số đo.
+* Hệ số tăng khi dữ liệu tăng 50 lần: Pandas ×3,2 thời gian, ×11 RAM (từ 100k đến 5M; độ dốc biên 400 MB cho mỗi triệu dòng watch thêm, tính từ 592 MB ở 1M và 2.192 MB ở 5M trong `batch_engines.md`: RAM(N) ≈ 592 MB + (N − 1M) × 400 MB/M ⇒ hết 8 GB (8.192 MB) ở khoảng 20M dòng); Spark ×1,9 thời gian, RAM bị chặn bởi heap 4 GB (spill ra đĩa) nên mở rộng được vượt RAM — nhưng chỉ đo tới 5M, nên "mở rộng ngang" là suy luận, không phải số đo.
 * Lần đo đầu (Spark tính lại dữ liệu đã làm sạch cho từng bảng đầu ra, chưa `persist`): 65 / 89 / 135 s (`batch_engines_spark_no_cache.md`); thêm `persist` còn 55 / 58 / 105 s.
   Lần đo đầu đó ghi `outputs_identical = False` ở 100k: do bảng `user_segments` — với 100k lượt xem không ai vượt 35 lượt nên Spark chỉ trả 2 segment (thiếu "Active") còn Pandas trả 3; đã sửa bằng cách join với danh sách segment cố định, chạy lại 100k với code hiện tại cho `True`. Cột RAM của Spark trong file đó (109-138 MB) chỉ đo tiến trình Python bọc ngoài, không gồm JVM, nên **không so sánh** với `batch_engines.md`.
 
@@ -190,7 +190,7 @@ Kết luận: giữ Flink cho BR2 nhưng **đã chuyển job mặc định sang 
 |---|---|---|---|
 | C1 Đúng đắn | 5 | 5 | cùng 10 bảng ở 100k/1M/5M và dữ liệu bẩn |
 | C5 Thời gian (≤5M) | 5 | 2 | 9,9-31,5 s so với 55-105 s |
-| C6 Mở rộng | 2 | 4 | RAM Pandas ≈0,45 GB/1M dòng, Spark bị chặn bởi heap |
+| C6 Mở rộng | 2 | 4 | RAM Pandas ≈ 592 MB + (N − 1M) × 400 MB/M (`batch_engines.md`), Spark bị chặn bởi heap |
 | C9 Vận hành | 5 | 3 | Pandas chỉ cần pip; Spark cần Java, Ivy/Maven cho connector |
 | C10 Chi phí | 4 | 3 | RAM đỉnh Spark ~3-4 GB đã cấp sẵn |
 | C11 Hệ sinh thái | 3 | 5 | Spark có Hive, Cassandra, Kafka, Parquet |
