@@ -8,12 +8,12 @@ from tests.helpers import pandas_tables, records, spark_tables
 pytestmark = pytest.mark.spark
 
 
-@pytest.mark.parametrize("dataset", ["fixture_dir", "peer_dir", "clean_dir", "dirty_dir", "sparse_dir"])
+@pytest.mark.parametrize("dataset", ["fixture_dir", "peer_dir", "decline_dir", "clean_dir", "dirty_dir", "sparse_dir"])
 def test_pandas_and_spark_outputs_are_identical(request, spark, dataset):
     raw_dir = request.getfixturevalue(dataset)
     pandas_result, pandas_report = pandas_tables(raw_dir)
     spark_result, spark_report = spark_tables(spark, raw_dir)
-    assert set(pandas_result) == set(spark_result) and len(pandas_result) == 19
+    assert set(pandas_result) == set(spark_result) and len(pandas_result) == 20
     for name, table in pandas_result.items():
         assert list(table.columns) == list(spark_result[name].columns), name
         assert records(table, sort=True) == records(spark_result[name], sort=True), name

@@ -37,6 +37,8 @@ EXPECTED = {
         ("C03", "Comedy 03", "Comedy", 6, 20.0, 5, 40.0, "low_completion", 3),
     ],
     "genre_engagement_peers": [("Comedy", 13, 5, 40.0, 2, 1, 1, 4), ("Drama", 2, 0, None, 2, 0, 0, 2)],
+    # ref 2026-03-15: recent window 02-16..03-15 holds all 246 views (5+6+8+10+12+25+20+25+30+40+60+5), 1 user, 12 titles
+    "activity_windows": [("recent", "2026-02-16", "2026-03-15", 246, 1, 12)],
     # C05: 10 recent views on days i % 7 -> 03-09..03-11 twice, 03-12..03-15 once.
     "movie_daily": [
         ("C05", "2026-03-09", 2), ("C05", "2026-03-10", 2), ("C05", "2026-03-11", 2), ("C05", "2026-03-12", 1),
@@ -52,7 +54,7 @@ def tables(request, peer_dir):
     return spark_tables(request.getfixturevalue("spark"), peer_dir)[0]
 
 
-@pytest.mark.parametrize("name", ["trending_growth", "low_engagement_movies", "genre_engagement_peers"])
+@pytest.mark.parametrize("name", ["trending_growth", "low_engagement_movies", "genre_engagement_peers", "activity_windows"])
 def test_table_matches_hand_computed_values(tables, name):
     assert records(tables[name]) == EXPECTED[name]
 
