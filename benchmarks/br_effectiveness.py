@@ -271,6 +271,19 @@ def main() -> None:
           f"weekend {overall.loc[rules.WEEKEND, 'avg_daily_views']}/day over {int(overall.loc[rules.WEEKEND, 'days'])} days ({uplift:+.1%})",
           int(overall["views"].sum()) == int(summary) and len(split) == 2 * (len(genres) + 1), ms)
 
+    # Manager alerts: the three dashboard limits (src/business_rules.py) evaluated on the stored tables.
+    inactive_share = int(segments.loc[segments["segment"] == "Inactive", "users"].sum()) / int(segments["users"].sum())
+    flagged_share = int(peers["flagged"].sum()) / int(peers["movies"].sum())
+    last_days = sorted(grid["day"].unique())[-2 * rules.MOVING_AVERAGE_DAYS:]
+    recent_days, earlier_days = last_days[rules.MOVING_AVERAGE_DAYS:], last_days[:rules.MOVING_AVERAGE_DAYS]
+    weekly = grid[grid["day"].isin(recent_days)].groupby("genre")["views"].sum() / grid[grid["day"].isin(earlier_days)].groupby("genre")["views"].sum() - 1
+    firing = int(inactive_share > rules.INACTIVE_SHARE_LIMIT) + int(flagged_share > rules.FLAGGED_SHARE_LIMIT) + int((weekly < -rules.GENRE_DROP_ALERT).any())
+    check(rows, "BR10", "Manager", "Manager alerts: limits evaluated on the stored tables (Inactive share, flagged share, worst genre week on week)",
+          f"Inactive {inactive_share:.1%} (limit {rules.INACTIVE_SHARE_LIMIT:.0%}); flagged {flagged_share:.1%} (limit {rules.FLAGGED_SHARE_LIMIT:.0%}); "
+          f"genre week on week {weekly.min():+.1%} ({weekly.idxmin()}) to {weekly.max():+.1%} ({weekly.idxmax()}), drop limit {rules.GENRE_DROP_ALERT:.0%}; "
+          f"{firing} of 3 alerts firing",
+          len(last_days) == 2 * rules.MOVING_AVERAGE_DAYS, 0.0)
+
     write_results(
         "br_effectiveness", rows, "Business-requirement success criteria measured on the running stack",
         ["Each criterion is evaluated on Cassandra and compared with an independent Pandas computation from the raw CSVs "

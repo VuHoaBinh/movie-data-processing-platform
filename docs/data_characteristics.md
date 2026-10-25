@@ -54,8 +54,8 @@ Bộ sinh còn có một tuỳ chọn `--dirty-rate` chèn có chủ đích bả
 |---|---|---|
 | Hive/Parquet `raw.*` | Bản sao Parquet của 4 CSV, schema tường minh, timestamp còn là chuỗi | 28,8 MB |
 | Hive/Parquet `curated.*` | Đã làm sạch bằng 7 luật, timestamp UTC; `curated.watch_events` phân vùng theo `watch_date`; thêm `curated.quality_report` | 29,7 MB |
-| Hive/Parquet `analytics.*` | 20 bảng tổng hợp phục vụ dashboard (19 bảng dùng chung với Pandas, `user_recommendations_als`) | {SIZE_ANALYTICS} |
-| Cassandra `movie_analytics` | {N_CASS} bảng do batch ghi theo mô hình query-first (24 bảng của dashboard, `quality_report` và hai bảng siêu dữ liệu `batch_table_rows`, `batch_runs`), cộng 2 bảng `live_trending`, `live_trending_spark` cho stream | {SIZE_CASS} |
+| Hive/Parquet `analytics.*` | 20 bảng tổng hợp phục vụ dashboard (19 bảng dùng chung với Pandas, `user_recommendations_als`) | 7,2 MB (`storage_footprint.md`) |
+| Cassandra `movie_analytics` | 27 bảng do batch ghi theo mô hình query-first (24 bảng của dashboard, `quality_report` và hai bảng siêu dữ liệu `batch_table_rows`, `batch_runs`), cộng 2 bảng `live_trending`, `live_trending_spark` cho stream | 43,6 MB cho cả keyspace, không tính snapshot (RF=1) |
 
 Luồng: `CSV → raw → curated → analytics → Cassandra` (`src/spark_batch_job.py`, hàm `run`). Cassandra là bản phục vụ có thể dựng lại bất cứ lúc nào.
 
@@ -82,7 +82,7 @@ Sự toàn vẹn khoá ngoại và tính duy nhất khoá chính được kiểm
 mọi `orphans` bằng 0. Khoá ngoại không được cơ sở dữ liệu ép buộc (CSV không có ràng buộc); luật `orphan_user` và `orphan_movie`
 trong `src/data_quality.py` thay vai trò đó khi làm sạch.
 
-Lược đồ phục vụ trong Cassandra (18 bảng do batch ghi, gồm hai bảng gợi ý, `quality_report` và 2 bảng siêu dữ liệu, cộng 2 bảng stream) nằm trong `sql/cassandra_schema.cql`; ánh xạ BR → bảng ở `docs/storage_decision.md` và mục 4 của `docs/business_requirements.md`.
+Lược đồ phục vụ trong Cassandra (27 bảng do batch ghi, gồm hai bảng gợi ý và tám bảng của BR2/BR8/BR9/BR10, `quality_report` và 2 bảng siêu dữ liệu, cộng 2 bảng stream) nằm trong `sql/cassandra_schema.cql`; ánh xạ BR → bảng ở `docs/storage_decision.md` và mục 4 của `docs/business_requirements.md`.
 
 ## 3. Đặc điểm Big Data
 
@@ -92,8 +92,8 @@ Lược đồ phục vụ trong Cassandra (18 bảng do batch ghi, gồm hai b�
 |---|---|---|
 | Số dòng | users 50.000; movies 20.000; ratings 500.000; watch_history 1.000.000 | `data_profile.md` |
 | CSV thô | 74,3 MB (watch_history 49,28 MB; ratings 21,46 MB) | `storage_footprint.md`, `data_profile.md` |
-| Parquet raw / curated / analytics | 28,8 / 29,7 / 6,2 MB | `storage_footprint.md` |
-| Cassandra (cả keyspace, không tính snapshot, RF=1, nén LZ4) | 31,4 MB | `storage_footprint.md` |
+| Parquet raw / curated / analytics | 28,0 / 29,6 / 7,2 MB | `storage_footprint.md` |
+| Cassandra (cả keyspace, không tính snapshot, RF=1, nén LZ4) | 43,6 MB | `storage_footprint.md` |
 | Khoảng thời gian | 180 ngày (2026-04-01 đến 2026-09-27) | `data_profile.md` |
 | Thời gian batch đầy đủ (1M dòng xem) | 337,3 s | `load_times.md` |
 | Pandas / Spark ở 1M và 5M dòng xem | 15,3 s / 58,5 s và 31,5 s / 104,7 s; RAM đỉnh 592 / 3.602 MB và 2.192 / 4.393 MB | `batch_engines.md` |
@@ -132,7 +132,7 @@ trung bình khoảng 0,064 sự kiện/s (tính từ 1.000.000 / (180 × 86.400)
 | CSV | 4 nguồn batch | Dạng bảng, có header, timestamp là chuỗi (mọi giá trị trong `data/` đều parse được; xem 4.3) |
 | JSON | `watch-events`, `trending-results` | Bán cấu trúc, mỗi sự kiện một thông điệp; Flink đọc bằng `format = json` và bỏ qua thông điệp lỗi (`json.ignore-parse-errors`) |
 | Parquet trên Hive | `raw.*`, `curated.*`, `analytics.*` | Dạng cột, nén, schema trong metastore; `curated.watch_events` phân vùng theo ngày |
-| Cassandra wide rows | 18 bảng do batch ghi + 2 bảng live | Một partition chứa nhiều dòng sắp xếp sẵn theo clustering key (ví dụ `live_trending`: partition là ngày, sắp theo `window_start DESC, rank`) |
+| Cassandra wide rows | 27 bảng do batch ghi + 2 bảng live | Một partition chứa nhiều dòng sắp xếp sẵn theo clustering key (ví dụ `live_trending`: partition là ngày, sắp theo `window_start DESC, rank`) |
 
 ### 3.4 Veracity (độ tin cậy)
 

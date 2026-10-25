@@ -28,7 +28,7 @@ Dùng **hai lớp lưu trữ bổ trợ nhau**:
    - `raw.*`: bản sao Parquet của CSV, schema tường minh, chưa làm sạch.
    - `curated.*`: dữ liệu đã chuẩn hoá (timestamp UTC, bỏ trùng/thiếu); `curated.watch_events`
      **phân vùng theo `watch_date`**.
-   - `analytics.*`: 19 bảng tổng hợp của dashboard dùng chung với Pandas (kể cả `user_recommendations`) và, nếu batch chạy ALS, `user_recommendations_als`; nguồn để nạp vào Cassandra (24 bảng phục vụ sau khi tách theo truy vấn).
+   - `analytics.*`: 19 bảng tổng hợp của dashboard dùng chung với Pandas (kể cả `user_recommendations`) và, nếu batch chạy ALS, `user_recommendations_als`; nguồn để nạp vào Cassandra (24 bảng phục vụ sau khi tách theo truy vấn, cộng `quality_report`, `batch_table_rows`, `batch_runs`).
 
 Luồng: `CSV → raw → curated → analytics → Cassandra`. Spark luôn tính lại từ lớp lake; Cassandra
 chỉ là bản "phục vụ" có thể dựng lại bất cứ lúc nào.
@@ -103,3 +103,7 @@ mô hình query-first: ghi nhiều hơn một chút để mỗi truy vấn đọ
 - Mọi bảng phục vụ có thể dựng lại từ lake bằng `python -m src.spark_batch_job`.
 - Kiểm thử tính đúng: số dòng Cassandra phải khớp đầu ra Spark (`tests/test_cassandra_counts.py`).
 - `user_recommendations` có 10 dòng cho mỗi user (500.000 dòng, 50.000 partition nhỏ, 11,4 MB trên đĩa): đổi lấy việc dashboard chỉ đọc một partition thay vì ghép hai truy vấn lúc đọc, và loại được phim đã xem ngay ở batch (Cassandra không có anti-join lúc đọc). Bảng ALS thêm 498.320 dòng nữa (49.832 user có lịch sử, 12,8 MB).
+
+## 6. Nâng cấp lược đồ trên một volume cũ
+
+`CREATE TABLE IF NOT EXISTS` không bao giờ sửa một bảng đã có, nên volume Cassandra tạo bởi một phiên bản lược đồ cũ giữ nguyên khoá chính cũ và lần batch sau ghi lỗi (ví dụ `low_engagement_movies` đổi khoá chính khi thêm `priority`). Các bảng phục vụ là dữ liệu dẫn xuất (batch truncate rồi nạp lại), nên `cassandra-init` chạy `python -m src.cassandra_store init`, hàm `apply_schema`: với mỗi bảng đã tồn tại nó tạo cùng định nghĩa trong một keyspace tạm, so cột, khoá chính và thứ tự clustering trong `system_schema.columns`, **xoá và tạo lại các bảng khác nhau** (bảng rỗng cho tới lần batch sau), rồi chạy phần `CREATE ... IF NOT EXISTS` còn lại. Không cần danh sách phiên bản phải bảo trì thủ công. `live_trending`, `live_trending_spark` (cửa sổ stream có TTL) và `batch_runs` (lịch sử chạy) không bao giờ bị xoá: nếu định nghĩa của chúng đổi, init báo `SchemaConflict` và hướng dẫn migrate thủ công hoặc `docker compose down -v`. Mỗi lần xoá bảng Cassandra tự chụp snapshot nên chiếm thêm đĩa cho tới `nodetool clearsnapshot`. Kiểm bằng `tests/test_schema_migration.py`.

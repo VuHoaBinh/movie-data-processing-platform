@@ -18,7 +18,7 @@ STAGES = {
     "build_tables": "analytics plan: eager scalars (global rating statistics, recommendation candidate bounds)",
     "als": "BR3 alternative: ALS training and scoring (Spark MLlib, 1M watch events)",
     "hive_analytics": "curated -> 20 analytics Parquet tables (19 shared with Pandas + ALS)",
-    "cassandra_load": "analytics + quality report -> 24 Cassandra serving tables (truncate + insert) + run metadata",
+    "cassandra_load": "analytics + quality report -> 25 Cassandra tables (24 serving + quality report; truncate + insert) + run metadata",
 }
 
 
@@ -32,7 +32,7 @@ def main() -> None:
     rows.append({"stage": "total", "what": "sum of the stages above", "seconds": round(sum(float(r["seconds"]) for r in rows), 1)})
     write_results(
         "load_times", rows, "Batch load times (1M watch rows)",
-        ["Spark local[*], 1.5 GB driver (`SPARK_DRIVER_MEMORY`), Docker Desktop; Cassandra writes go through spark-cassandra-connector 3.5.1."],
+        ["Spark local[8] (`SPARK_LOCAL_CORES`), 1.5 GB driver (`SPARK_DRIVER_MEMORY`), Docker Desktop; Cassandra writes go through spark-cassandra-connector 3.5.1."],
     )
 
 
