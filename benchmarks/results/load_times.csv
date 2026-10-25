@@ -1,8 +1,8 @@
 stage,what,seconds
-hive_raw,CSV -> raw Parquet tables (4),87.3
-hive_curated,"raw -> curated Parquet (cleaning, curated.watch_events partitioned by date)",50.8
-build_tables,"analytics plan: eager scalars (global rating statistics, recommendation candidate bounds)",36.8
-als,"BR3 alternative: ALS training and scoring (Spark MLlib, 1M watch events)",37.3
-hive_analytics,curated -> 12 analytics Parquet tables (11 shared with Pandas + ALS),76.5
-cassandra_load,analytics + quality report -> 16 Cassandra serving tables (truncate + insert) + run metadata,48.6
-total,sum of the stages above,337.3
+hive_raw,CSV -> raw Parquet tables (4),18.4
+hive_curated,"raw -> curated Parquet (cleaning, curated.watch_events partitioned by date)",52.2
+build_tables,"analytics plan: eager scalars (global rating statistics, recommendation candidate bounds)",47.4
+als,"BR3 alternative: ALS training and scoring (Spark MLlib, 1M watch events)",40.7
+hive_analytics,curated -> 20 analytics Parquet tables (19 shared with Pandas + ALS),149.8
+cassandra_load,analytics + quality report -> 25 Cassandra tables (24 serving + quality report; truncate + insert) + run metadata,53.5
+total,sum of the stages above,362.0

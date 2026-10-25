@@ -68,7 +68,7 @@ Flink UI at `http://localhost:8081`; Cassandra is on `localhost:9042`.
 
 * The first live BR2 results appear after the first five-minute event window closes.
 * The dashboard has four workspaces: **Viewer** (search, trending, recommendations), **Analyst** (filters, BR4-BR7),
-  **Manager** (KPI cards, alerts, BR8-BR10) and **Data Engineering** (last batch run and stage times, rejected rows per
+  **Manager** (KPI cards and alerts, then BR8-BR10: titles low against their genre with the reason, segment cut-offs and the agreement matrix, trends by genre / title / weekday vs weekend) and **Data Engineering** (last batch run and stage times, rejected rows per
   cleaning rule, age of the newest live window, rows per Cassandra table). Every chart and table carries a one-line
   caption with the business question it answers. If the background batch fails, the sidebar shows the tail of its log
   and a "Retry batch" button.
@@ -76,9 +76,12 @@ Flink UI at `http://localhost:8081`; Cassandra is on `localhost:9042`.
   starts the Spark batch **in the background** (status shown in the sidebar); "Refresh batch (Spark)"
   does the same on demand.
 * Stop with `Ctrl+C`, then `docker compose down` (add `-v` to also drop the Cassandra volume).
-* `CREATE TABLE IF NOT EXISTS` does not alter an existing table: a Cassandra volume created before the BR8 upgrade
-  still holds the old `low_engagement_movies` (bucket / views / title key). Drop the volume (`docker compose down -v`)
-  before the first run of this version; the batch rebuilds every serving table.
+* Upgrading an existing stack: `cassandra-init` (`python -m src.cassandra_store init`) compares every table in
+  `sql/cassandra_schema.cql` with the live one and drops and recreates the serving tables whose columns, primary key
+  or clustering order changed (for example `low_engagement_movies`, which gained `priority` in the BR8 upgrade); the next
+  batch refills them. `live_trending*` and `batch_runs` are never dropped: if their definition ever changes, init stops
+  with `SchemaConflict` and you migrate by hand or run `docker compose down -v`. No manual step is needed for a volume
+  created by an earlier version. `tests/test_schema_migration.py` checks it against the old table definition.
 
 The compose setup is a single-machine demo: one Kafka broker/partition, one Flink TaskManager, one
 Cassandra node (RF=1).
@@ -143,6 +146,11 @@ docker compose --profile tools run --rm --no-deps -e RUN_HIVE_TESTS=1 benchmark 
   demonstrated; `--out-dir` also keeps experiments away from `data/`.
 * `tests/test_cassandra_counts.py`, `tests/test_storage_equivalence.py` - Cassandra row counts match the
   batch output and both stores answer every dashboard query identically.
+* `tests/test_schema_migration.py` - an old Cassandra volume (the PR #2 `low_engagement_movies`) is upgraded by `cassandra-init`.
+* `tests/test_app_pages.py` - Streamlit `AppTest` renders the four pages on the loaded stack without errors; the user and
+  title pickers (a search box that narrows to at most 50 matches, never the 50,000 users or 20,000 titles) stay capped.
+  The Manager alert limits are named constants in `src/business_rules.py` (`INACTIVE_SHARE_LIMIT`, `FLAGGED_SHARE_LIMIT`,
+  `GENRE_DROP_ALERT`), justified in `docs/business_requirements.md` section 2.3.
 * `python -m src.profile_data` profiles the raw CSVs (`benchmarks/results/data_profile.md` / `.csv`, tested in
   `tests/test_profile_data.py`); `python -m src.data_quality` reports rejected rows on them.
 * `benchmarks/` - `batch_engines` (Pandas vs Spark at 100k/1M/5M), `storage_latency` (Cassandra vs
