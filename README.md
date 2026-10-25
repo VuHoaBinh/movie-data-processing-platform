@@ -24,7 +24,7 @@ Data management (see [docs/storage_decision.md](docs/storage_decision.md) for th
 * **Lake layer: Hive tables on Parquet** (Spark SQL with Hive support, embedded Derby metastore,
   warehouse in `data/warehouse/`): `raw.*` (schema-explicit copy of the CSVs), `curated.*`
   (UTC timestamps, de-duplicated; `curated.watch_events` partitioned by `watch_date`) and
-  `analytics.*` (the 10 dashboard tables).
+  `analytics.*` (the dashboard tables, including the BR3 recommendation tables).
 
 One Spark run reads the CSVs, builds the lake zones, computes the dashboard tables and loads them into
 Cassandra. The Pandas pipeline (`src/batch_processing.py`) is a lightweight twin that writes the same
@@ -36,10 +36,10 @@ tables as CSV.
 |---|---|---|
 | BR1 | Movie Search & Filtering | Viewer searches titles and filters by genre from the movie catalogue. |
 | BR2 | Trending Movie Detection | Viewer sees popular movies and the latest five-minute Kafka/Flink window. |
-| BR3 | Personalized Movie Recommendation | Viewer gets highly rated movies in their top two watched genres. |
+| BR3 | Personalized Movie Recommendation | Viewer gets ten unwatched titles, precomputed per user: genre-based (best-rated titles in their top two watched genres, popular titles as filler) or Spark MLlib ALS (similar viewers); the page lets the viewer pick the recommender (ALS is the default, genre-based the alternative and the fallback for users without watch history). |
 | BR4 | Movie Rating Analytics | Analyst sees the overall rating metric and highest-rated movies with rating counts. |
-| BR5 | Genre Popularity Analysis | Analyst compares views and unique viewers by genre. |
-| BR6 | User Engagement Analysis | Analyst reviews views, watch time, active days, and subscription usage. |
+| BR5 | Genre Popularity Analysis | Analyst compares views and unique viewers by genre (two charts and a table with views per viewer). |
+| BR6 | User Engagement Analysis | Analyst reviews views, watch minutes and active days per user (KPI cards with mean and median, three histograms, filters by plan and region), subscription usage and viewing hours. |
 | BR7 | Movie Performance Analysis | Analyst compares views, rating, completion rate, and watch hours. |
 | BR8 | Low-Engagement Movie Detection | Manager sees the ten lowest-viewed titles; movies with zero views are included. |
 | BR9 | User Segmentation | Manager views Inactive, Casual, and Active user counts, including users with no views. |
@@ -62,12 +62,17 @@ docker compose up --build
 
 This starts Kafka, Cassandra (+ `cassandra-init`, which applies the schema), a Flink JobManager and
 TaskManager, the BR2 Flink job, a continuous CSV event producer, the result materializer, a one-shot
-`spark-batch` service (CSV -> Hive/Parquet -> Cassandra, about 4-5 minutes) and the Streamlit
+`spark-batch` service (CSV -> Hive/Parquet -> ALS -> Cassandra, about 6 minutes; 5-10 on a busy machine) and the Streamlit
 dashboard, which waits for the batch to finish. Open the dashboard at `http://localhost:8501`, the
 Flink UI at `http://localhost:8081`; Cassandra is on `localhost:9042`.
 
 * The first live BR2 results appear after the first five-minute event window closes.
-* The "Record a movie view" form appends the event to `data/watch_history.csv`, sends it to Kafka and
+* The dashboard has four workspaces: **Viewer** (search, trending, recommendations), **Analyst** (filters, BR4-BR7),
+  **Manager** (KPI cards, alerts, BR8-BR10) and **Data Engineering** (last batch run and stage times, rejected rows per
+  cleaning rule, age of the newest live window, rows per Cassandra table). Every chart and table carries a one-line
+  caption with the business question it answers. If the background batch fails, the sidebar shows the tail of its log
+  and a "Retry batch" button.
+* The "Record a movie view" form (Viewer workspace) appends the event to `data/watch_history.csv`, sends it to Kafka and
   starts the Spark batch **in the background** (status shown in the sidebar); "Refresh batch (Spark)"
   does the same on demand.
 * Stop with `Ctrl+C`, then `docker compose down` (add `-v` to also drop the Cassandra volume).
@@ -104,7 +109,8 @@ $env:CASSANDRA_HOST = "localhost"; streamlit run app.py
 ```
 
 Spark batch flags: `--warehouse-dir` (Hive location, default `data/warehouse`), `--no-hive`,
-`--cassandra-host` (default `$CASSANDRA_HOST`), `--csv-output-dir` (optional CSV copy of the 10 tables).
+`--cassandra-host` (default `$CASSANDRA_HOST`), `--csv-output-dir` (optional CSV copy of the analytics tables),
+`--no-als` (skip the ALS recommendations, which add training time to the batch).
 
 ## Tests, data quality and benchmarks
 
@@ -118,9 +124,12 @@ docker compose --profile tools run --rm --no-deps -e RUN_HIVE_TESTS=1 benchmark 
 ```
 
 * `tests/test_fixture_tables.py` - a hand-made 4-user / 4-movie / 50-view dataset with the expected value of
-  every cell of the 10 tables derived by hand, run against both engines.
-* `tests/test_parity.py` - Pandas and Spark produce exactly the same tables (and rejected-row counts) on the
-  fixture and on generated clean / dirty data.
+  every cell of the 11 tables derived by hand, run against both engines.
+* `tests/test_parity.py` - Pandas and Spark produce exactly the same 11 tables (and rejected-row counts) on the
+  fixture and on generated clean / dirty / sparse data. The ALS table is Spark only and is not part of the parity.
+* `tests/test_recommendations.py` - BR3: a second hand-derived dataset (genre ties, filler, cold start), no watched
+  title in any list on generated data (both engines), and the ALS tests (ten ranks per user, no watched title,
+  identical output on a second run with the same seed).
 * `tests/test_data_quality.py` + `src/data_quality.py` - the cleaning rules (duplicate ids, nulls, invalid
   values, future timestamps, orphan foreign keys) with the number of rejected rows per rule. See them on the
   real data with `python -m src.data_quality`; Spark logs the same report and stores it in
@@ -133,7 +142,8 @@ docker compose --profile tools run --rm --no-deps -e RUN_HIVE_TESTS=1 benchmark 
   `tests/test_profile_data.py`); `python -m src.data_quality` reports rejected rows on them.
 * `benchmarks/` - `batch_engines` (Pandas vs Spark at 100k/1M/5M), `storage_latency` (Cassandra vs
   Hive/Parquet), `stream_latency` (Flink vs Spark Structured Streaming), `load_times`, `storage_footprint`,
-  `br_effectiveness`. Results are committed in `benchmarks/results/`; the analysis is in
+  `br_effectiveness`, `recommender_eval` (BR3: popularity vs genre-based vs ALS on a time-based split; needs Spark,
+  run it in the Docker `benchmark` service). Results are committed in `benchmarks/results/`; the analysis is in
   [docs/evaluation.md](docs/evaluation.md). Generated benchmark data goes to `benchmarks/tmp/` (git-ignored).
 
 ## Project structure
@@ -145,7 +155,9 @@ sql/cassandra_schema.cql     Cassandra keyspace and per-query tables
 docs/storage_decision.md     ADR: why Cassandra + Hive/Parquet (Vietnamese)
 docs/business_requirements.md Business context, stakeholders, BR1-BR10 rationale and traceability (Vietnamese)
 docs/data_characteristics.md Data sources, schema, Big Data characteristics, design consequences (Vietnamese)
-src/spark_batch_job.py       Spark batch: lake zones, dashboard tables, Cassandra load
+src/spark_batch_job.py       Spark batch: lake zones, dashboard tables, Cassandra load, run metadata
+src/recommendations.py       BR3 genre-based top-10 per user, watched titles excluded (Pandas and Spark twins)
+src/recommender_als.py       BR3 alternative: Spark MLlib ALS (Spark only)
 src/batch_processing.py      Pandas twin of the batch pipeline (CSV output)
 src/cassandra_store.py       Cassandra connection / schema helper
 src/data_quality.py          Cleaning rules + rejected-row report (Pandas and Spark)
@@ -157,7 +169,7 @@ src/kafka_event_producer.py  CSV-to-Kafka demo producer
 src/stream_processing.py     Offline stream replay utility
 flink/flink_trending_sql_job.py Flink SQL 5-minute trending job (default; ~15x the throughput)
 flink/flink_trending_job.py  PyFlink DataStream version (kept for comparison, ~500 events/s max)
-app.py                       Streamlit presentation layer (reads Cassandra)
+app.py                       Streamlit presentation layer (Viewer / Analyst / Manager / Data Engineering, reads Cassandra)
 tests/                       pytest suite (fixture, parity, data quality, integration)
 benchmarks/                  Benchmark scripts and committed results
 docs/evaluation.md           Correctness / performance / effectiveness evaluation
