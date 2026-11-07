@@ -176,6 +176,11 @@ DASHBOARD_QUERIES: tuple[DashboardQuery, ...] = (
         (MOVIE,),
     ),
     DashboardQuery(
+        "activity_windows", "BR9", "range",
+        "SELECT period, start_date, end_date, views, active_users, active_titles FROM activity_windows WHERE bucket = 'all'",
+        "SELECT period, start_date, end_date, views, active_users, active_titles FROM analytics.activity_windows ORDER BY period",
+    ),
+    DashboardQuery(
         "weekday_weekend", "BR10", "range",
         "SELECT genre, day_type, days, views, avg_daily_views FROM weekday_weekend_views WHERE bucket = 'all'",
         "SELECT genre, day_type, days, views, avg_daily_views FROM analytics.weekday_weekend_views "

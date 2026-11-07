@@ -257,6 +257,19 @@ CREATE TABLE IF NOT EXISTS weekday_weekend_views (
   PRIMARY KEY ((bucket), genre, day_type)
 );
 
+-- BR8 / BR9 alerts: views, users with a view and titles with a view in the last 28 days ('recent') and the
+-- 28 days before ('previous'), ending at the latest watch date. Two rows (a window without views has none).
+CREATE TABLE IF NOT EXISTS activity_windows (
+  bucket text,
+  period text,
+  start_date date,
+  end_date date,
+  views bigint,
+  active_users bigint,
+  active_titles bigint,
+  PRIMARY KEY ((bucket), period)
+);
+
 CREATE TABLE IF NOT EXISTS summary_metrics (
   bucket text PRIMARY KEY,
   users bigint,
