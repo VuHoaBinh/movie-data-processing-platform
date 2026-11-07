@@ -56,6 +56,7 @@ def create_spark(
     # UTC session time zone: naive raw timestamps are UTC, and ISO values with offsets convert to UTC.
     builder = (
         SparkSession.builder.appName(app_name)
+        .master(f"local[{os.getenv('SPARK_LOCAL_CORES', '8')}]")  # 20 parallel tasks (local[*]) ran the 8 GB demo VM out of memory
         .config("spark.sql.session.timeZone", "UTC")
         .config("spark.sql.shuffle.partitions", "16")  # the default 200 is far too many for this data size
         # Takes effect when this process starts the JVM: the default 1 GB heap runs out while writing the
@@ -197,7 +198,7 @@ def peer_low_engagement(movie_performance: DataFrame) -> tuple[DataFrame, DataFr
         F.when(low_views & low_completion, rules.REASON_BOTH)
         .when(low_views, rules.REASON_LOW_VIEWS)
         .when(low_completion, rules.REASON_LOW_COMPLETION),  # null = not flagged
-    ).cache()
+    )  # not cached: the 1.5 GB heap of the demo stack has no room for extra in-memory copies
     priority = F.create_map(*[item for reason, value in rules.REASON_PRIORITY.items() for item in (F.lit(reason), F.lit(value))])
     flagged = (
         scored.where(F.col("reason").isNotNull())
@@ -231,7 +232,6 @@ def peer_low_engagement(movie_performance: DataFrame) -> tuple[DataFrame, DataFr
 def user_segment_tables(users: DataFrame, user_engagement: DataFrame) -> tuple[DataFrame, DataFrame, DataFrame, DataFrame]:
     """BR9: quantile thresholds, the engagement table with segments, segment totals, agreement matrix."""
     spark = users.sparkSession
-    user_engagement = user_engagement.persist()  # read by the threshold, segment and agreement queries
     percentiles = (rules.SEGMENT_LOW_PERCENTILE, rules.SEGMENT_HIGH_PERCENTILE)
     population = user_engagement.count()
     cuts = [
@@ -278,9 +278,37 @@ def user_segment_tables(users: DataFrame, user_engagement: DataFrame) -> tuple[D
     return thresholds, engagement, user_segments, segment_agreement
 
 
+def window_activity(joined: DataFrame) -> DataFrame:
+    """Alert inputs (Spark twin of `batch_processing.window_activity`)."""
+    days = joined.select("user_id", "movie_id", F.to_date("watch_timestamp").alias("day"))
+    reference = days.agg(F.max("day").alias("reference_date"))
+    width = rules.ACTIVITY_WINDOW_DAYS
+    return (
+        days.crossJoin(reference)
+        .withColumn("age", F.datediff("reference_date", "day"))
+        .withColumn(
+            "period",
+            F.when(F.col("age") < width, rules.RECENT).when(F.col("age") < 2 * width, rules.PREVIOUS),
+        )
+        .where(F.col("period").isNotNull())
+        .groupBy("period", "reference_date")
+        .agg(
+            F.count(F.lit(1)).alias("views"),
+            F.countDistinct("user_id").alias("active_users"),
+            F.countDistinct("movie_id").alias("active_titles"),
+        )
+        .withColumn(
+            "end_date", F.when(F.col("period") == rules.RECENT, F.col("reference_date")).otherwise(F.date_sub("reference_date", width))
+        )
+        .withColumn("start_date", F.date_sub("end_date", width - 1))
+        .select("period", "start_date", "end_date", "views", "active_users", "active_titles")
+        .orderBy("period")
+    )
+
+
 def view_trends(movies: DataFrame, joined: DataFrame) -> tuple[DataFrame, DataFrame, DataFrame]:
     """BR10 (Spark twin of `batch_processing.view_trends`)."""
-    watched = joined.select("watch_id", "movie_id", "genre", F.to_date("watch_timestamp").alias("day")).persist()
+    watched = joined.select("watch_id", "movie_id", "genre", F.to_date("watch_timestamp").alias("day"))
     span = watched.agg(F.min("day").alias("first_day"), F.max("day").alias("last_day"))
     calendar = span.select(F.explode(F.expr("sequence(first_day, last_day, interval 1 day)")).alias("day"))
     counts = watched.groupBy("genre", "day").agg(F.count(F.lit(1)).alias("views"))
@@ -425,6 +453,7 @@ def build_tables(
         F.count("watch_id").alias("views")
     ).orderBy("hour")
     genre_daily_views, movie_daily_views, weekday_weekend_views = view_trends(movies, joined)
+    activity_windows = window_activity(joined)
     summary_metrics = spark_create_summary(users, movies, watches, ratings)
 
     return {
@@ -445,6 +474,7 @@ def build_tables(
         "genre_daily_views": genre_daily_views,
         "movie_daily_views": movie_daily_views,
         "weekday_weekend_views": weekday_weekend_views,
+        "activity_windows": activity_windows,
         "hourly_views": hourly_views,
         "summary_metrics": summary_metrics,
     }
@@ -509,6 +539,9 @@ def serving_frames(tables: dict[str, DataFrame]) -> dict[str, DataFrame]:
         "movie_daily_views": tables["movie_daily_views"],
         "weekday_weekend_views": tables["weekday_weekend_views"].select(
             bucket, "genre", "day_type", "days", "views", "avg_daily_views"
+        ),
+        "activity_windows": tables["activity_windows"].select(
+            bucket, "period", "start_date", "end_date", "views", "active_users", "active_titles"
         ),
         "summary_metrics": tables["summary_metrics"].select(
             bucket, "users", "movies", "views", "ratings", "average_rating"

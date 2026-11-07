@@ -133,6 +133,44 @@ def peer_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return directory
 
 
+# Third and fourth hand-made datasets for the Manager alerts: 10 users watch once each in the previous 28-day window
+# (2026-01-05..02-01); in the recent window (2026-02-02..03-01) either only 5 of them keep watching (decline) or all
+# 10 do (healthy). Reference date 2026-03-01 in both.
+TREND_USERS = "user_id,age,gender,region,registration_date,subscription_plan,activity_profile" + chr(10) + chr(10).join(
+    f"U{n},30,Male,Vietnam,2025-01-01,Basic,Active" for n in range(1, 11)
+) + chr(10)
+TREND_MOVIES = "movie_id,title,genre,release_year,duration,content_type,language,maturity_rating" + chr(10) + chr(10).join(
+    f"M{n},Title {n},Drama,2020,100,Movie,English,P" for n in range(1, 6)
+) + chr(10)
+TREND_RATINGS = "rating_id,user_id,movie_id,rating,timestamp" + chr(10) + "R1,U1,M1,5,2026-01-02 12:00:00" + chr(10)
+
+
+def trend_watches(recent_users: list[int]) -> str:
+    rows = ["watch_id,user_id,movie_id,watch_timestamp,watch_duration,device"]
+    rows += [f"P{n},U{n},M{1 + (n - 1) % 5},2026-01-10 10:00:00,50,Web" for n in range(1, 11)]
+    rows += [f"R{n},U{n},M{1 if n <= 4 else 1 + (n - 1) % 5},2026-02-10 10:00:00,50,Web" for n in recent_users]
+    rows.append("A1,U1,M1,2026-03-01 10:00:00,50,Web")
+    return chr(10).join(rows) + chr(10)
+
+
+def trend_directory(directory: Path, recent_users: list[int]) -> Path:
+    (directory / "users.csv").write_text(TREND_USERS, encoding="utf-8")
+    (directory / "movies.csv").write_text(TREND_MOVIES, encoding="utf-8")
+    (directory / "ratings.csv").write_text(TREND_RATINGS, encoding="utf-8")
+    (directory / "watch_history.csv").write_text(trend_watches(recent_users), encoding="utf-8")
+    return directory
+
+
+@pytest.fixture(scope="session")
+def decline_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return trend_directory(tmp_path_factory.mktemp("decline"), [1, 2, 3, 4, 5])
+
+
+@pytest.fixture(scope="session")
+def healthy_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return trend_directory(tmp_path_factory.mktemp("healthy"), list(range(1, 11)))
+
+
 @pytest.fixture(scope="session")
 def fixture_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """Tiny hand-made dataset whose analytics values are derived by hand in test_fixture_tables.py."""
