@@ -143,6 +143,37 @@ def peer_low_engagement(movie_performance: pd.DataFrame) -> tuple[pd.DataFrame, 
     return peers, flagged
 
 
+def window_activity(joined: pd.DataFrame) -> pd.DataFrame:
+    """Alert inputs: views, users with a view and titles with a view in the last 28 days and the 28 days before.
+
+    The windows end at the latest watch date; a window without views has no row.
+    """
+    columns = ["period", "start_date", "end_date", "views", "active_users", "active_titles"]
+    days = joined["watch_timestamp"].dt.normalize()
+    if days.empty:
+        return pd.DataFrame(columns=columns)
+    reference = days.max()
+    age = (reference - days).dt.days
+    width = rules.ACTIVITY_WINDOW_DAYS
+    rows = []
+    for label, mask, first_age, last_age in (
+        (rules.PREVIOUS, (age >= width) & (age < 2 * width), 2 * width - 1, width),
+        (rules.RECENT, age < width, width - 1, 0),
+    ):
+        part = joined[mask]
+        if part.empty:
+            continue
+        rows.append({
+            "period": label,
+            "start_date": (reference - pd.Timedelta(days=first_age)).date(),
+            "end_date": (reference - pd.Timedelta(days=last_age)).date(),
+            "views": len(part),
+            "active_users": part["user_id"].nunique(),
+            "active_titles": part["movie_id"].nunique(),
+        })
+    return pd.DataFrame(rows, columns=columns)
+
+
 def view_trends(movies: pd.DataFrame, joined: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """BR10: daily views per genre (complete calendar, 7-day moving average), per movie, weekday vs weekend."""
     genre_columns = ["day", "genre", "views", "views_ma7"]
@@ -308,6 +339,7 @@ def build_tables(
         .agg(views=("watch_id", "count"))
     )
     genre_daily_views, movie_daily_views, weekday_weekend_views = view_trends(movies, joined)
+    activity_windows = window_activity(joined)
     summary_metrics = pd.DataFrame(
         [{
             "users": len(users),
@@ -336,6 +368,7 @@ def build_tables(
         "genre_daily_views": genre_daily_views,
         "movie_daily_views": movie_daily_views,
         "weekday_weekend_views": weekday_weekend_views,
+        "activity_windows": activity_windows,
         "hourly_views": hourly_views,
         "summary_metrics": summary_metrics,
     }

@@ -12,9 +12,9 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from src.alerts import activity_alerts, genre_alert
 from src.business_rules import (
-    ALL_GENRES, FLAGGED_SHARE_LIMIT, GENRE_DROP_ALERT, INACTIVE_SHARE_LIMIT, MOVING_AVERAGE_DAYS,
-    PEER_COMPLETION_PERCENTILE, PEER_MIN_VIEWS_FOR_COMPLETION,
+    ACTIVITY_WINDOW_DAYS, ALL_GENRES, MOVING_AVERAGE_DAYS, PEER_COMPLETION_PERCENTILE, PEER_MIN_VIEWS_FOR_COMPLETION,
     PEER_VIEWS_PERCENTILE, TREND_DAMPING, TREND_MIN_RECENT_VIEWS, TREND_WINDOW_DAYS, WEEKDAY, WEEKEND,
 )
 from src.cassandra_store import BATCH_BUCKET, CassandraUnavailable, connect, query_frame, table_counts
@@ -32,7 +32,7 @@ RAW_DIR = Path("data")
 BATCH_LOG = RAW_DIR / "batch_refresh.log"
 TOP_SHARE = 0.30  # BR7 shows the top 30% of movies by views.
 LIVE_STALE_MINUTES = 10  # BR2 live window older than this is "waiting for Flink".
-# Manager alert limits live in src/business_rules.py (INACTIVE_SHARE_LIMIT, FLAGGED_SHARE_LIMIT, GENRE_DROP_ALERT).
+# Manager alert limits live in src/business_rules.py (ACTIVE_USERS_DROP_ALERT, ACTIVE_TITLES_DROP_ALERT, GENRE_DROP_ALERT).
 WEEK_DAYS = MOVING_AVERAGE_DAYS  # the weekly comparison uses the same 7-day window as the moving average.
 BR8_LIST_ROWS = 20  # titles listed in the BR8 table.
 RISING_ROWS = 10  # titles listed in the BR2 "rising now" table.
@@ -635,7 +635,6 @@ def manager_page() -> None:
     low_cut, high_cut = (int(value) for value in cuts["views_threshold"])
     total_users = int(segments["users"].sum())
     inactive_users = int(segments.loc["Inactive", "users"]) if "Inactive" in segments.index else 0
-    inactive_share = inactive_users / total_users if total_users else 0.0
     segment_labels = {
         "Inactive": f"Inactive (up to {low_cut} views)",
         "Casual": f"Casual ({low_cut + 1} to {high_cut} views)",
@@ -653,49 +652,53 @@ def manager_page() -> None:
     # BR10: the genre x day grid gives the weekly comparison per genre and for the platform.
     grid = cql("SELECT day, genre, views, views_ma7 FROM genre_daily_views WHERE bucket = %s", (BATCH_BUCKET,))
     grid["day"] = pd.to_datetime(grid["day"].astype(str))
+    week_alert, week_changes = genre_alert(grid)
     last_days = sorted(grid["day"].unique())[-2 * WEEK_DAYS:]
-    recent_days, earlier_days = last_days[WEEK_DAYS:], last_days[:WEEK_DAYS]
-    week_views = pd.DataFrame({
-        "last_7_days": grid[grid["day"].isin(recent_days)].groupby("genre")["views"].sum(),
-        "previous_7_days": grid[grid["day"].isin(earlier_days)].groupby("genre")["views"].sum(),
-    })
-    week_views["change"] = week_views["last_7_days"] / week_views["previous_7_days"].where(week_views["previous_7_days"] > 0) - 1
-    last_week, previous_week = int(week_views["last_7_days"].sum()), int(week_views["previous_7_days"].sum())
+    last_week = int(grid[grid["day"].isin(last_days[WEEK_DAYS:])]["views"].sum())
+    previous_week = int(grid[grid["day"].isin(last_days[:WEEK_DAYS])]["views"].sum())
     trend = last_week / previous_week - 1 if previous_week else 0.0
+
+    # Alerts compare two windows of an absolute count; the shares of the segment and peer lists are constant by
+    # construction, so they are shown as explanations and never alerted on.
+    windows = cql("SELECT period, start_date, end_date, views, active_users, active_titles FROM activity_windows WHERE bucket = %s", (BATCH_BUCKET,))
+    users_alert, titles_alert = activity_alerts(windows)
+    recent = windows[windows["period"] == "recent"]
+    active_users = int(recent["active_users"].iloc[0]) if len(recent) else 0
+    active_titles = int(recent["active_titles"].iloc[0]) if len(recent) else 0
+
+    def change_text(change) -> str:
+        return "no earlier window" if change is None else f"{change:+.1%} vs the {ACTIVITY_WINDOW_DAYS} days before"
 
     cards = st.columns(4)
     cards[0].metric("Users", whole(total_users), border=True)
-    cards[1].metric("Inactive users", f"{inactive_share:.1%}", f"{whole(inactive_users)} users, up to {low_cut} views",
-                    delta_color="off", delta_arrow="off", border=True)
-    cards[2].metric("Flagged titles (vs genre peers)", whole(flagged_total), f"{whole(both_total)} low on both",
-                    delta_color="off", delta_arrow="off", border=True)
+    cards[1].metric(f"Active users, last {ACTIVITY_WINDOW_DAYS} days", whole(active_users), change_text(users_alert.change), border=True)
+    cards[2].metric(f"Active titles, last {ACTIVITY_WINDOW_DAYS} days", whole(active_titles), change_text(titles_alert.change), border=True)
     cards[3].metric(f"Views, last {WEEK_DAYS} days", whole(last_week), f"{trend:+.1%} vs the {WEEK_DAYS} days before", border=True)
 
     with st.container(border=True):
         st.markdown("**Alerts**")
-        if inactive_share > INACTIVE_SHARE_LIMIT:
+        if users_alert.firing:
             st.warning(
-                f"{inactive_share:.1%} of users are Inactive (up to {low_cut} views, the quietest quarter), above the "
-                f"{INACTIVE_SHARE_LIMIT:.0%} limit: many users sit at the same low count; plan a win-back campaign (BR9)."
+                f"Users with a view fell {abs(users_alert.change):.1%} against the previous {ACTIVITY_WINDOW_DAYS} days, past the "
+                f"{users_alert.limit:.0%} limit: plan a win-back campaign; {whole(inactive_users)} users are already Inactive (BR9)."
             )
         else:
-            st.success(f"Inactive users are {inactive_share:.1%}, within the {INACTIVE_SHARE_LIMIT:.0%} limit (BR9).")
-        if flagged_share > FLAGGED_SHARE_LIMIT:
+            st.success(f"Users with a view: {change_text(users_alert.change)}, within the {users_alert.limit:.0%} drop limit (BR9).")
+        if titles_alert.firing:
             st.warning(
-                f"{whole(flagged_total)} titles ({flagged_share:.1%} of the catalogue) are low against their genre, above the "
-                f"{FLAGGED_SHARE_LIMIT:.0%} limit; start with the {whole(both_total)} that are low on both views and completion (BR8)."
+                f"Titles with a view fell {abs(titles_alert.change):.1%} against the previous {ACTIVITY_WINDOW_DAYS} days, past the "
+                f"{titles_alert.limit:.0%} limit: review the catalogue, starting with the {whole(both_total)} titles low on both views and completion (BR8)."
             )
         else:
             st.success(
-                f"{whole(flagged_total)} titles ({flagged_share:.1%}) are low against their genre, within the "
-                f"{FLAGGED_SHARE_LIMIT:.0%} limit; {whole(both_total)} are low on both views and completion (BR8)."
+                f"Titles with a view: {change_text(titles_alert.change)}, within the {titles_alert.limit:.0%} drop limit (BR8); "
+                f"{whole(flagged_total)} titles ({flagged_share:.1%}) are low against their genre, {whole(both_total)} on both views and completion."
             )
-        falling = week_views[week_views["change"] < -GENRE_DROP_ALERT].sort_values("change")
-        if len(falling):
-            names = ", ".join(f"{genre} {change:+.1%}" for genre, change in falling["change"].items())
-            st.warning(f"Views fell more than {GENRE_DROP_ALERT:.0%} against the previous {WEEK_DAYS} days in: {names} (BR10).")
+        if week_alert.firing:
+            names = ", ".join(f"{genre} {change:+.1%}" for genre, change in week_changes[week_changes < -week_alert.limit].sort_values().items())
+            st.warning(f"Views fell more than {week_alert.limit:.0%} against the previous {WEEK_DAYS} days in: {names} (BR10).")
         else:
-            st.success(f"No genre lost more than {GENRE_DROP_ALERT:.0%} of its views against the previous {WEEK_DAYS} days (BR10).")
+            st.success(f"No genre lost more than {week_alert.limit:.0%} of its views against the previous {WEEK_DAYS} days (BR10).")
 
     st.subheader("BR8 - Titles that are low against their genre")
     ask("BR8", "Which titles get few views or are abandoned compared with other titles of the same genre?")
@@ -804,7 +807,7 @@ def manager_page() -> None:
         )
         st.caption(
             f"Last {WEEK_DAYS} days against the {WEEK_DAYS} days before, per genre: "
-            + ", ".join(f"{genre} {change:+.1%}" for genre, change in week_views["change"].items())
+            + ", ".join(f"{genre} {change:+.1%}" for genre, change in week_changes.items())
         )
     with movie_tab:
         movie_id = pick_movie("br10_movie")

@@ -28,10 +28,16 @@ ALL_GENRES = "All genres"
 WEEKDAY, WEEKEND = "Weekday", "Weekend"
 
 
-# Manager alerts on the dashboard (docs/business_requirements.md section 2.3 gives the reason for each limit).
-INACTIVE_SHARE_LIMIT = 0.30  # the Inactive segment is the quietest quarter by construction; above 30% many users share one low count
-FLAGGED_SHARE_LIMIT = 0.25  # two bottom-decile tests flag about a fifth of the catalogue; above 25% something beyond the tails is wrong
-GENRE_DROP_ALERT = 0.10  # a genre whose last 7 days of views fell more than 10% against the 7 days before
+# BR9 / BR8 / BR10 activity windows: the 28 days up to the latest watch date against the 28 days before.
+ACTIVITY_WINDOW_DAYS = 28  # four whole weeks: the weekly cycle cancels out and most users watch at least once
+RECENT, PREVIOUS = "recent", "previous"
+
+# Manager alerts (docs/business_requirements.md section 2.3 gives the reason for each limit). Each one compares two
+# time windows of an absolute count, so it moves when the platform gets worse; the p25 / p10 shares of the segment
+# and peer lists are constant by construction and are explanatory views only.
+ACTIVE_USERS_DROP_ALERT = 0.10  # users with a view fell by more than 10% against the previous 28 days (noise on this data: under 1%)
+ACTIVE_TITLES_DROP_ALERT = 0.10  # titles with a view fell by more than 10% against the previous 28 days (noise on this data: under 3%)
+GENRE_DROP_ALERT = 0.10  # a genre whose last 7 days of views fell more than 10% against the 7 days before (noise: under 3.5%)
 
 
 def nearest_rank_position(count: int, percent: int) -> int:
