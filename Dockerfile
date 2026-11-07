@@ -19,6 +19,9 @@ RUN python -m pip install --no-cache-dir --timeout 120 --retries 10 -r requireme
 # Resolve the Spark-Cassandra and Spark-Kafka connectors at build time so the batch job starts offline.
 RUN python -c "from pyspark.sql import SparkSession; SparkSession.builder.config('spark.jars.packages', 'com.datastax.spark:spark-cassandra-connector_2.12:3.5.1,org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.3').getOrCreate().stop()"
 
+COPY requirements-dev.txt ./
+RUN python -m pip install --no-cache-dir -r requirements-dev.txt
+
 COPY app.py ./
 COPY src ./src
 

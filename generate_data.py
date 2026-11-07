@@ -5,8 +5,7 @@ import csv, random
 from datetime import datetime, timedelta
 from pathlib import Path
 
-random.seed(42)
-OUT = Path("data"); OUT.mkdir(exist_ok=True)
+SEED = 42
 GENRES = ["Action", "Comedy", "Drama", "Horror", "Romance", "Sci-Fi", "Animation", "Thriller"]
 REGIONS = ["Vietnam", "Singapore", "Thailand", "Japan", "Korea"]
 DEVICES = ["Mobile", "TV", "Web", "Tablet"]
@@ -35,9 +34,65 @@ RECENT_TITLES = [
 
 VIETNAMESE_TITLES = {"Mai", "Lật Mặt 7: Một Điều Ước", "Đào, Phở và Piano", "Nhà Bà Nữ", "Bố Già", "Mắt Biếc", "Em và Trịnh", "Quỷ Cẩu", "Kẻ Ăn Hồn", "Cô Dâu Hào Môn"}
 
-def write(name, fields, rows):
-    with (OUT / name).open("w", newline="", encoding="utf-8") as f:
+def write(out_dir, name, fields, rows):
+    with (out_dir / name).open("w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fields); w.writeheader(); w.writerows(rows)
+
+
+def write_tuples(out_dir, name, fields, rows):
+    """Same CSV as `write`, from tuples: watch/rating rows are kept as tuples (a 5M-row run fits in RAM)."""
+    with (out_dir / name).open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f); w.writerow(fields); w.writerows(rows)
+
+WATCH_FIELDS = ["watch_id", "user_id", "movie_id", "watch_timestamp", "watch_duration", "device"]
+RATING_FIELDS = ["rating_id", "user_id", "movie_id", "rating", "timestamp"]
+
+DIRTY_KINDS = (
+    "duplicate_id", "invalid_timestamp", "null_value", "invalid_value", "future_timestamp", "orphan_user", "orphan_movie",
+)
+
+
+def inject_dirty_rows(watches, ratings, rate, seed=SEED + 1):
+    """Append bad rows (about `rate` x the clean row count, split evenly over DIRTY_KINDS).
+
+    Uses its own RNG so the clean data is identical with and without --dirty-rate. Every injected
+    row fails exactly one rule, so the data-quality report must reject exactly the injected counts.
+    Returns {table: {kind: injected_row_count}}.
+    """
+    rng = random.Random(seed)
+    injected = {}
+    for table, rows, id_field, fields in (
+        ("watch_history", watches, "watch_id", WATCH_FIELDS), ("ratings", ratings, "rating_id", RATING_FIELDS)
+    ):
+        clean = list(rows)
+        per_kind = int(len(clean) * rate / len(DIRTY_KINDS))
+        counts = dict.fromkeys(DIRTY_KINDS, 0)
+        for kind in DIRTY_KINDS:
+            for n in range(per_kind):
+                row = dict(zip(fields, rng.choice(clean)))
+                if kind != "duplicate_id":
+                    row[id_field] = f"{id_field[0].upper()}X{len(rows) + 1:07}"
+                if kind == "null_value":
+                    row[rng.choice([f for f in row if f != id_field])] = ""
+                elif kind == "invalid_value":
+                    if table == "ratings":
+                        row["rating"] = rng.choice([0, 6, -1, 99])
+                    else:
+                        row["watch_duration"] = rng.choice([0, -5, -120])
+                elif kind == "invalid_timestamp":
+                    row["timestamp" if table == "ratings" else "watch_timestamp"] = "not-a-date"
+                elif kind == "future_timestamp":
+                    stamp = "timestamp" if table == "ratings" else "watch_timestamp"
+                    row[stamp] = (datetime(2030, 1, 1) + timedelta(days=rng.randrange(365))).strftime("%Y-%m-%d %H:%M:%S")
+                elif kind == "orphan_user":
+                    row["user_id"] = f"U9{rng.randrange(10_000, 99_999)}"
+                elif kind == "orphan_movie":
+                    row["movie_id"] = f"M9{rng.randrange(10_000, 99_999)}"
+                rows.append(tuple(row[field] for field in fields))
+                counts[kind] += 1
+        injected[table] = counts
+    return injected
+
 
 def main():
     parser = argparse.ArgumentParser(description="Generate relational movie-platform CSV data.")
@@ -45,10 +100,21 @@ def main():
     parser.add_argument("--movies", type=int, default=20_000)
     parser.add_argument("--ratings", type=int, default=500_000)
     parser.add_argument("--watches", type=int, default=1_000_000)
-    
+    parser.add_argument("--out-dir", type=Path, default=Path("data"), help="where to write the CSV files")
+    parser.add_argument(
+        "--dirty-rate", type=float, default=0.0,
+        help="opt-in: append bad rows (duplicates, nulls, invalid values, future timestamps, orphans) "
+        "equal to this fraction of the clean watch/rating rows",
+    )
+
     args = parser.parse_args()
     if args.ratings > args.watches:
         parser.error("--ratings cannot exceed --watches")
+    if not 0 <= args.dirty_rate < 1:
+        parser.error("--dirty-rate must be in [0, 1)")
+    random.seed(SEED)
+    OUT = args.out_dir
+    OUT.mkdir(parents=True, exist_ok=True)
 
     plans = ["Basic", "Standard", "Premium"]
     users = []
@@ -131,23 +197,19 @@ def main():
         ts=day+timedelta(hours=hour,minutes=random.randrange(60))
         completion=.50 + quality[m['movie_id']]*.35 + (.08 if u['subscription_plan']=='Premium' else 0)
         dur=max(5,min(m['duration'],int(random.gauss(m['duration']*completion,16))))
-        watches.append({"watch_id":f"W{i:06}","user_id":u['user_id'],"movie_id":m['movie_id'],"watch_timestamp":ts.strftime('%Y-%m-%d %H:%M:%S'),"watch_duration":dur,"device":random.choice(DEVICES)})
+        watches.append((f"W{i:06}",u['user_id'],m['movie_id'],ts.strftime('%Y-%m-%d %H:%M:%S'),dur,random.choice(DEVICES)))
     
     ratings=[]
     for i,w in enumerate(random.sample(watches,args.ratings),1):
-        completion=w['watch_duration']/by_id[w['movie_id']]['duration']; q=quality[w['movie_id']]
+        _, w_user, w_movie, w_time, w_duration, _ = w
+        completion=w_duration/by_id[w_movie]['duration']; q=quality[w_movie]
         rating=min(5,max(1,round(1.5+q*2.4+completion*1.2+random.gauss(0,.55))))
-        ratings.append(
-            {
-                "rating_id":f"R{i:06}",
-                "user_id":w['user_id'],
-                "movie_id":w['movie_id'],
-                "rating":rating,
-                "timestamp":w['watch_timestamp']
-            }
-        )
+        ratings.append((f"R{i:06}", w_user, w_movie, rating, w_time))
     
-    write('users.csv',list(users[0]),users); write('movies.csv',list(movies[0]),movies); write('watch_history.csv',list(watches[0]),watches); write('ratings.csv',list(ratings[0]),ratings)
+    injected = inject_dirty_rows(watches, ratings, args.dirty_rate) if args.dirty_rate > 0 else None
+    write(OUT,'users.csv',list(users[0]),users); write(OUT,'movies.csv',list(movies[0]),movies); write_tuples(OUT,'watch_history.csv',WATCH_FIELDS,watches); write_tuples(OUT,'ratings.csv',RATING_FIELDS,ratings)
     print(f'Created users={args.users:,}, movies={args.movies:,}, ratings={args.ratings:,}, watch_history={args.watches:,}')
+    if injected:
+        print(f'Injected dirty rows: {injected}')
 
 if __name__ == '__main__': main()
