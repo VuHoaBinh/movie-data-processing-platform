@@ -1,0 +1,5 @@
+table              input      duplicate_id invalid_timestamp        null_value     invalid_value  future_timestamp       orphan_user      orphan_movie    output
+users             50,000                 0                 0                 0                 0                 0                 0                 0    50,000
+movies            20,000                 0                 0                 0                 0                 0                 0                 0    20,000
+ratings          500,000                 0                 0                 0                 0                 0                 0                 0   500,000
+watch_history  1,000,000                 0                 0                 0                 0                 0                 0                 0 1,000,000
