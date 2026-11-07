@@ -83,6 +83,8 @@ Cassandra node (RF=1).
   rows for the windows both engines processed.
 * **Hive/Parquet instead of Cassandra for serving**: `src/dashboard_queries.py` holds every dashboard
   query twice (CQL and Spark SQL over `analytics.*`); results are identical.
+  The compose stack runs the Flink SQL job; the PyFlink DataStream job cannot keep up with the 500 events/s demo
+  producer (see [docs/evaluation.md](docs/evaluation.md)); submit it with `-py /opt/flink/usrlib/flink_trending_job.py` to compare.
   Set `TREND_WINDOW_SECONDS` to shorten the window for experiments (Flink job and Spark job).
 
 ## Run pieces locally
@@ -104,6 +106,34 @@ $env:CASSANDRA_HOST = "localhost"; streamlit run app.py
 Spark batch flags: `--warehouse-dir` (Hive location, default `data/warehouse`), `--no-hive`,
 `--cassandra-host` (default `$CASSANDRA_HOST`), `--csv-output-dir` (optional CSV copy of the 10 tables).
 
+## Tests, data quality and benchmarks
+
+```powershell
+python -m pip install -r requirements-dev.txt
+python -m pytest                      # unit + Pandas/Spark parity tests (needs Java for the Spark ones)
+$env:CASSANDRA_HOST = "localhost"; python -m pytest tests/test_cassandra_counts.py   # stack must be up and loaded
+
+# Everything, including Cassandra-vs-Hive equivalence, inside the Docker stack:
+docker compose --profile tools run --rm --no-deps -e RUN_HIVE_TESTS=1 benchmark python -m pytest -q
+```
+
+* `tests/test_fixture_tables.py` - a hand-made 4-user / 4-movie / 50-view dataset with the expected value of
+  every cell of the 10 tables derived by hand, run against both engines.
+* `tests/test_parity.py` - Pandas and Spark produce exactly the same tables (and rejected-row counts) on the
+  fixture and on generated clean / dirty data.
+* `tests/test_data_quality.py` + `src/data_quality.py` - the cleaning rules (duplicate ids, nulls, invalid
+  values, future timestamps, orphan foreign keys) with the number of rejected rows per rule. See them on the
+  real data with `python -m src.data_quality`; Spark logs the same report and stores it in
+  `curated.quality_report`.
+* `generate_data.py --dirty-rate 0.05 --out-dir some/dir` appends bad rows (opt-in) so cleaning can be
+  demonstrated; `--out-dir` also keeps experiments away from `data/`.
+* `tests/test_cassandra_counts.py`, `tests/test_storage_equivalence.py` - Cassandra row counts match the
+  batch output and both stores answer every dashboard query identically.
+* `benchmarks/` - `batch_engines` (Pandas vs Spark at 100k/1M/5M), `storage_latency` (Cassandra vs
+  Hive/Parquet), `stream_latency` (Flink vs Spark Structured Streaming), `load_times`, `storage_footprint`,
+  `br_effectiveness`. Results are committed in `benchmarks/results/`; the analysis is in
+  [docs/evaluation.md](docs/evaluation.md). Generated benchmark data goes to `benchmarks/tmp/` (git-ignored).
+
 ## Project structure
 
 ```text
@@ -114,12 +144,17 @@ docs/storage_decision.md     ADR: why Cassandra + Hive/Parquet (Vietnamese)
 src/spark_batch_job.py       Spark batch: lake zones, dashboard tables, Cassandra load
 src/batch_processing.py      Pandas twin of the batch pipeline (CSV output)
 src/cassandra_store.py       Cassandra connection / schema helper
+src/data_quality.py          Cleaning rules + rejected-row report (Pandas and Spark)
 src/trending_materializer.py Kafka result -> Cassandra live_trending
 src/spark_streaming_trending.py Spark Structured Streaming alternative to Flink
 src/dashboard_queries.py     Dashboard queries as CQL and Spark SQL (storage comparison)
 src/kafka_event_producer.py  CSV-to-Kafka demo producer
 src/stream_processing.py     Offline stream replay utility
-flink/flink_trending_job.py  PyFlink event-time trending job
+flink/flink_trending_sql_job.py Flink SQL 5-minute trending job (default; ~15x the throughput)
+flink/flink_trending_job.py  PyFlink DataStream version (kept for comparison, ~500 events/s max)
 app.py                       Streamlit presentation layer (reads Cassandra)
+tests/                       pytest suite (fixture, parity, data quality, integration)
+benchmarks/                  Benchmark scripts and committed results
+docs/evaluation.md           Correctness / performance / effectiveness evaluation
 data_dictionary.md           Raw data definitions
 ```

@@ -1,0 +1,7 @@
+watch_rows,ratings_rows,engine,runs,median_s,min_s,max_s,peak_mem_mb,outputs_identical
+100000,50000,pandas,3,12.2,11.5,13.2,193,False
+100000,50000,spark,3,65.1,62.3,68.2,109,False
+1000000,500000,pandas,3,17.7,17.4,18.2,593,True
+1000000,500000,spark,3,89.0,79.5,94.0,137,True
+5000000,2500000,pandas,1,36.7,36.7,36.7,2251,True
+5000000,2500000,spark,1,135.3,135.3,135.3,138,True
