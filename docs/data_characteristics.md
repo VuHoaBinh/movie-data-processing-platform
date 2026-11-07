@@ -54,8 +54,8 @@ Bộ sinh còn có một tuỳ chọn `--dirty-rate` chèn có chủ đích bả
 |---|---|---|
 | Hive/Parquet `raw.*` | Bản sao Parquet của 4 CSV, schema tường minh, timestamp còn là chuỗi | 28,8 MB |
 | Hive/Parquet `curated.*` | Đã làm sạch bằng 7 luật, timestamp UTC; `curated.watch_events` phân vùng theo `watch_date`; thêm `curated.quality_report` | 29,7 MB |
-| Hive/Parquet `analytics.*` | 20 bảng tổng hợp phục vụ dashboard (19 bảng dùng chung với Pandas, `user_recommendations_als`) | 7,2 MB (`storage_footprint.md`) |
-| Cassandra `movie_analytics` | 27 bảng do batch ghi theo mô hình query-first (24 bảng của dashboard, `quality_report` và hai bảng siêu dữ liệu `batch_table_rows`, `batch_runs`), cộng 2 bảng `live_trending`, `live_trending_spark` cho stream | 43,6 MB cho cả keyspace, không tính snapshot (RF=1) |
+| Hive/Parquet `analytics.*` | 21 bảng tổng hợp phục vụ dashboard (20 bảng dùng chung với Pandas, `user_recommendations_als`) | 7,2 MB (`storage_footprint.md`) |
+| Cassandra `movie_analytics` | 28 bảng do batch ghi theo mô hình query-first (25 bảng của dashboard, `quality_report` và hai bảng siêu dữ liệu `batch_table_rows`, `batch_runs`), cộng 2 bảng `live_trending`, `live_trending_spark` cho stream | 43,6 MB cho cả keyspace, không tính snapshot (RF=1) |
 
 Luồng: `CSV → raw → curated → analytics → Cassandra` (`src/spark_batch_job.py`, hàm `run`). Cassandra là bản phục vụ có thể dựng lại bất cứ lúc nào.
 
@@ -82,7 +82,7 @@ Sự toàn vẹn khoá ngoại và tính duy nhất khoá chính được kiểm
 mọi `orphans` bằng 0. Khoá ngoại không được cơ sở dữ liệu ép buộc (CSV không có ràng buộc); luật `orphan_user` và `orphan_movie`
 trong `src/data_quality.py` thay vai trò đó khi làm sạch.
 
-Lược đồ phục vụ trong Cassandra (27 bảng do batch ghi, gồm hai bảng gợi ý và tám bảng của BR2/BR8/BR9/BR10, `quality_report` và 2 bảng siêu dữ liệu, cộng 2 bảng stream) nằm trong `sql/cassandra_schema.cql`; ánh xạ BR → bảng ở `docs/storage_decision.md` và mục 4 của `docs/business_requirements.md`.
+Lược đồ phục vụ trong Cassandra (28 bảng do batch ghi, gồm hai bảng gợi ý và chín bảng của BR2/BR8/BR9/BR10, `quality_report` và 2 bảng siêu dữ liệu, cộng 2 bảng stream) nằm trong `sql/cassandra_schema.cql`; ánh xạ BR → bảng ở `docs/storage_decision.md` và mục 4 của `docs/business_requirements.md`.
 
 ## 3. Đặc điểm Big Data
 
@@ -132,7 +132,7 @@ trung bình khoảng 0,064 sự kiện/s (tính từ 1.000.000 / (180 × 86.400)
 | CSV | 4 nguồn batch | Dạng bảng, có header, timestamp là chuỗi (mọi giá trị trong `data/` đều parse được; xem 4.3) |
 | JSON | `watch-events`, `trending-results` | Bán cấu trúc, mỗi sự kiện một thông điệp; Flink đọc bằng `format = json` và bỏ qua thông điệp lỗi (`json.ignore-parse-errors`) |
 | Parquet trên Hive | `raw.*`, `curated.*`, `analytics.*` | Dạng cột, nén, schema trong metastore; `curated.watch_events` phân vùng theo ngày |
-| Cassandra wide rows | 27 bảng do batch ghi + 2 bảng live | Một partition chứa nhiều dòng sắp xếp sẵn theo clustering key (ví dụ `live_trending`: partition là ngày, sắp theo `window_start DESC, rank`) |
+| Cassandra wide rows | 28 bảng do batch ghi + 2 bảng live | Một partition chứa nhiều dòng sắp xếp sẵn theo clustering key (ví dụ `live_trending`: partition là ngày, sắp theo `window_start DESC, rank`) |
 
 ### 3.4 Veracity (độ tin cậy)
 

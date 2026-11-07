@@ -53,6 +53,7 @@ def expected_counts(tables: dict) -> dict[str, int]:
         "genre_daily_views": len(tables["genre_daily_views"]),
         "movie_daily_views": len(tables["movie_daily_views"]),
         "weekday_weekend_views": len(tables["weekday_weekend_views"]),
+        "activity_windows": len(tables["activity_windows"]),
         "summary_metrics": 1,
     }
 

@@ -17,6 +17,7 @@ import pandas as pd
 
 from benchmarks.common import write_results
 from src import batch_processing, business_rules as rules
+from src.alerts import activity_alerts, genre_alert
 from src.cassandra_store import connect, query_frame
 
 TOP_SHARE = 0.30
@@ -271,18 +272,34 @@ def main() -> None:
           f"weekend {overall.loc[rules.WEEKEND, 'avg_daily_views']}/day over {int(overall.loc[rules.WEEKEND, 'days'])} days ({uplift:+.1%})",
           int(overall["views"].sum()) == int(summary) and len(split) == 2 * (len(genres) + 1), ms)
 
-    # Manager alerts: the three dashboard limits (src/business_rules.py) evaluated on the stored tables.
-    inactive_share = int(segments.loc[segments["segment"] == "Inactive", "users"].sum()) / int(segments["users"].sum())
-    flagged_share = int(peers["flagged"].sum()) / int(peers["movies"].sum())
-    last_days = sorted(grid["day"].unique())[-2 * rules.MOVING_AVERAGE_DAYS:]
-    recent_days, earlier_days = last_days[rules.MOVING_AVERAGE_DAYS:], last_days[:rules.MOVING_AVERAGE_DAYS]
-    weekly = grid[grid["day"].isin(recent_days)].groupby("genre")["views"].sum() / grid[grid["day"].isin(earlier_days)].groupby("genre")["views"].sum() - 1
-    firing = int(inactive_share > rules.INACTIVE_SHARE_LIMIT) + int(flagged_share > rules.FLAGGED_SHARE_LIMIT) + int((weekly < -rules.GENRE_DROP_ALERT).any())
-    check(rows, "BR10", "Manager", "Manager alerts: limits evaluated on the stored tables (Inactive share, flagged share, worst genre week on week)",
-          f"Inactive {inactive_share:.1%} (limit {rules.INACTIVE_SHARE_LIMIT:.0%}); flagged {flagged_share:.1%} (limit {rules.FLAGGED_SHARE_LIMIT:.0%}); "
-          f"genre week on week {weekly.min():+.1%} ({weekly.idxmin()}) to {weekly.max():+.1%} ({weekly.idxmax()}), drop limit {rules.GENRE_DROP_ALERT:.0%}; "
+    # Manager alerts: absolute counts in two windows (src/alerts.py), read from the stored tables.
+    windows, ms = timed(session, "SELECT period, start_date, end_date, views, active_users, active_titles FROM activity_windows WHERE bucket = 'all'")
+    reference = expected["activity_windows"]
+    same = windows.astype(str).sort_values("period").reset_index(drop=True).equals(reference.astype(str).sort_values("period").reset_index(drop=True))
+    users_alert, titles_alert = activity_alerts(windows)
+    genre_check, changes = genre_alert(grid)
+    firing = sum(alert.firing for alert in (users_alert, titles_alert, genre_check))
+    def pct(value):
+        return "n/a" if value is None else f"{value:+.1%}"
+    check(rows, "BR9", "Manager", "activity windows (28 days vs the 28 before) equal the Pandas table; the alerts compare them",
+          f"active users {pct(users_alert.change)} (limit -{users_alert.limit:.0%}), active titles {pct(titles_alert.change)} (limit -{titles_alert.limit:.0%}); "
+          f"genre week on week {pct(float(changes.min()))} ({changes.idxmin()}) to {pct(float(changes.max()))} ({changes.idxmax()}), limit -{genre_check.limit:.0%}; "
           f"{firing} of 3 alerts firing",
-          len(last_days) == 2 * rules.MOVING_AVERAGE_DAYS, 0.0)
+          same and len(windows) == 2 and not firing, ms)
+
+    # Noise check: how far the two counts move when the reference date slides back (windows of 28 days, 20 positions).
+    day_age = (watches["watch_timestamp"].dt.normalize().max() - watches["watch_timestamp"].dt.normalize()).dt.days
+    drifts = {"users": [], "titles": []}
+    for shift in range(0, 60, 3):
+        shifted = day_age - shift
+        recent_part = watches[(shifted >= 0) & (shifted < rules.ACTIVITY_WINDOW_DAYS)]
+        earlier_part = watches[(shifted >= rules.ACTIVITY_WINDOW_DAYS) & (shifted < 2 * rules.ACTIVITY_WINDOW_DAYS)]
+        drifts["users"].append(recent_part["user_id"].nunique() / earlier_part["user_id"].nunique() - 1)
+        drifts["titles"].append(recent_part["movie_id"].nunique() / earlier_part["movie_id"].nunique() - 1)
+    worst = min(min(values) for values in drifts.values())
+    check(rows, "BR9", "Manager", "alert limits sit above the normal window-to-window noise (reference date slid back 0-57 days)",
+          f"active users {min(drifts['users']):+.1%} to {max(drifts['users']):+.1%}; active titles {min(drifts['titles']):+.1%} to {max(drifts['titles']):+.1%}; "
+          f"limits -{rules.ACTIVE_USERS_DROP_ALERT:.0%} / -{rules.ACTIVE_TITLES_DROP_ALERT:.0%}", worst > -rules.ACTIVE_TITLES_DROP_ALERT, 0.0)
 
     write_results(
         "br_effectiveness", rows, "Business-requirement success criteria measured on the running stack",

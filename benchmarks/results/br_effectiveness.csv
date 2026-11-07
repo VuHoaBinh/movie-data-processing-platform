@@ -1,32 +1,33 @@
 br,user_group,criterion,measured,pass,query_ms
-BR1,Viewer,browse-all returns every movie (8 genre partitions),"20,000 of 20,000 movies",yes,109.2
-BR1,Viewer,title search 'spider' finds the Spider-Man titles,2 titles,yes,109.2
-BR2,Viewer,all-time top-10 equals the Pandas ranking,True,yes,2.2
-BR2,Viewer,live window has ranks 1..10 and is < 10 min old,"10 rows, newest window 7.2 min old",yes,1.5
-BR2,Viewer,rising-now top-10 equals an independent growth ranking (reference date 2026-09-27),True; best growth 1.056 (27 vs 8 views),yes,2.6
-BR2,Viewer,volume floor + damping keep tiny titles out of the top-10 (vs a naive recent/previous ratio),"mean recent views 22.2 vs 7.2 for the naive ratio; min 14; 460 of 20,000 movies pass the floor",yes,2.6
-BR3,Viewer,genre-based: no watched title is recommended (200 random users),"0 watched titles in 2,000 recommendations for 200 users with a list",yes,2.2
-BR3,Viewer,genre-based: favourite-genre rows stay in the user's top-2 genres and lists equal the Pandas lists,0 users with a foreign genre; 200/200 lists identical,yes,2.2
-BR3,Viewer,ALS: no watched title is recommended (200 random users),"0 watched titles in 1,990 recommendations for 199 users with a list",yes,2.2
+BR1,Viewer,browse-all returns every movie (8 genre partitions),"20,000 of 20,000 movies",yes,121.5
+BR1,Viewer,title search 'spider' finds the Spider-Man titles,2 titles,yes,121.5
+BR2,Viewer,all-time top-10 equals the Pandas ranking,True,yes,2.0
+BR2,Viewer,live window has ranks 1..10 and is < 10 min old,"10 rows, newest window 9.1 min old",yes,2.5
+BR2,Viewer,rising-now top-10 equals an independent growth ranking (reference date 2026-09-27),True; best growth 1.056 (27 vs 8 views),yes,2.0
+BR2,Viewer,volume floor + damping keep tiny titles out of the top-10 (vs a naive recent/previous ratio),"mean recent views 22.2 vs 7.2 for the naive ratio; min 14; 460 of 20,000 movies pass the floor",yes,2.0
+BR3,Viewer,genre-based: no watched title is recommended (200 random users),"0 watched titles in 2,000 recommendations for 200 users with a list",yes,2.3
+BR3,Viewer,genre-based: favourite-genre rows stay in the user's top-2 genres and lists equal the Pandas lists,0 users with a foreign genre; 200/200 lists identical,yes,2.3
+BR3,Viewer,ALS: no watched title is recommended (200 random users),"0 watched titles in 1,990 recommendations for 199 users with a list",yes,1.9
 BR3,Viewer,"share of users that get favourite-genre recommendations (the rest are cold-start, shown popular titles)",99.66% genre-based; every user has a list: True,yes,0.0
-BR3,Viewer,ALS serves every user with watch history (cold-start users fall back to the genre-based list),"49,832 of 49,832 users with history (99.66% of all users)",yes,372.6
-BR4,Analyst,top-10 by weighted rating equals the Pandas ranking,True,yes,2.4
-BR4,Analyst,no top-10 title rests on very few ratings,min rating_count in top-10 = 169,yes,2.4
-BR5,Analyst,sum of genre views = total views,"1,000,000 vs 1,000,000",yes,1.9
-BR5,Analyst,unique viewers per genre equal the Pandas distinct count and never exceed the user count,"8 genres, max 42,915 of 50,000 users",yes,1.9
-BR6,Analyst,engagement scan covers all users; views add up,"50,000 users, 1,000,000 views",yes,432.6
-BR6,Analyst,watch minutes and active days per user equal the Pandas values,"94,838,155 minutes, active days 0-58 (mean 18.3, median 12), median watch minutes 1141",yes,432.6
-BR7,Analyst,"top 30% of movies by views are returned, with the minimum views above the 70th percentile","6,000 movies, min views 37",yes,24.8
-BR8,Manager,top-10 of the peer-relative list equals the Pandas list,reasons ['both'],yes,1.3
-BR8,Manager,every genre has flagged titles that satisfy the peer rule; stored counts add up (8 genre partitions),"4,171 of 20,000 titles; per-genre share 19.4%-23.2%",yes,33.3
-BR8,Manager,baseline: the 10 lowest-viewed titles (no peers) equal the Pandas list,"8 of 10 are Horror (Horror 8, Animation 2)",yes,1.3
-BR9,Manager,segments cover all users exactly once,"50,000 users in 3 segments",yes,1.2
-BR9,Manager,stored thresholds equal independent nearest-rank quantiles of views per user,"p[25, 75] = [7, 37] views",yes,0.9
-BR9,Manager,"segments agree with the generator's activity_profile (confusion matrix, quantile vs former fixed 10/35)","80.96% agreement vs 70.55% with fixed thresholds; matrix (profile -> Inactive/Casual/Active users): Inactive -> 9,464/495/0; Casual -> 3,646/18,783/0; Active -> 0/5,377/12,235",yes,1.6
+BR3,Viewer,ALS serves every user with watch history (cold-start users fall back to the genre-based list),"49,832 of 49,832 users with history (99.66% of all users)",yes,370.1
+BR4,Analyst,top-10 by weighted rating equals the Pandas ranking,True,yes,3.1
+BR4,Analyst,no top-10 title rests on very few ratings,min rating_count in top-10 = 169,yes,3.1
+BR5,Analyst,sum of genre views = total views,"1,000,000 vs 1,000,000",yes,2.8
+BR5,Analyst,unique viewers per genre equal the Pandas distinct count and never exceed the user count,"8 genres, max 42,915 of 50,000 users",yes,2.8
+BR6,Analyst,engagement scan covers all users; views add up,"50,000 users, 1,000,000 views",yes,409.2
+BR6,Analyst,watch minutes and active days per user equal the Pandas values,"94,838,155 minutes, active days 0-58 (mean 18.3, median 12), median watch minutes 1141",yes,409.2
+BR7,Analyst,"top 30% of movies by views are returned, with the minimum views above the 70th percentile","6,000 movies, min views 37",yes,24.7
+BR8,Manager,top-10 of the peer-relative list equals the Pandas list,reasons ['both'],yes,2.6
+BR8,Manager,every genre has flagged titles that satisfy the peer rule; stored counts add up (8 genre partitions),"4,171 of 20,000 titles; per-genre share 19.4%-23.2%",yes,37.6
+BR8,Manager,baseline: the 10 lowest-viewed titles (no peers) equal the Pandas list,"8 of 10 are Horror (Horror 8, Animation 2)",yes,3.7
+BR9,Manager,segments cover all users exactly once,"50,000 users in 3 segments",yes,2.2
+BR9,Manager,stored thresholds equal independent nearest-rank quantiles of views per user,"p[25, 75] = [7, 37] views",yes,1.4
+BR9,Manager,"segments agree with the generator's activity_profile (confusion matrix, quantile vs former fixed 10/35)","80.96% agreement vs 70.55% with fixed thresholds; matrix (profile -> Inactive/Casual/Active users): Inactive -> 9,464/495/0; Casual -> 3,646/18,783/0; Active -> 0/5,377/12,235",yes,1.5
 BR9,Manager,sensitivity of the agreement to the chosen quantile pair (information only),p25/p75 (7/37 views) 81.0%; p33/p67 (9/31 views) 80.7%; p20/p80 (6/40 views) 76.6%; p20/p65 (6/26 views) 93.4%,yes,0.0
-BR10,Manager,daily series has one point per day and adds up to total views,"180 days, 1,000,000 views",yes,1.9
-BR10,Manager,genre x day grid is complete (days x genres) and its per-day sums equal the daily series,"1,440 rows = 180 days x 8 genres",yes,5.6
-BR10,Manager,7-day moving average of the last day equals a manual mean (Action),1574.71 vs 1574.71; first 6 days empty: True,yes,5.6
-BR10,Manager,"per-movie daily series adds up to the movie's views (200 random movies, 1 partition each)","200/200 movies OK; sparse table holds 587,082 rows (a dense grid would be 3,600,000)",yes,1.8
-BR10,Manager,weekday + weekend views add up to total views; weekend uplift per day is reported,"weekday 5552.1/day over 128 days, weekend 5564.1/day over 52 days (+0.2%)",yes,1.6
-BR10,Manager,"Manager alerts: limits evaluated on the stored tables (Inactive share, flagged share, worst genre week on week)","Inactive 26.2% (limit 30%); flagged 20.9% (limit 25%); genre week on week -3.5% (Thriller) to +3.3% (Comedy), drop limit 10%; 0 of 3 alerts firing",yes,0.0
+BR10,Manager,daily series has one point per day and adds up to total views,"180 days, 1,000,000 views",yes,3.6
+BR10,Manager,genre x day grid is complete (days x genres) and its per-day sums equal the daily series,"1,440 rows = 180 days x 8 genres",yes,6.5
+BR10,Manager,7-day moving average of the last day equals a manual mean (Action),1574.71 vs 1574.71; first 6 days empty: True,yes,6.5
+BR10,Manager,"per-movie daily series adds up to the movie's views (200 random movies, 1 partition each)","200/200 movies OK; sparse table holds 587,082 rows (a dense grid would be 3,600,000)",yes,2.3
+BR10,Manager,weekday + weekend views add up to total views; weekend uplift per day is reported,"weekday 5552.1/day over 128 days, weekend 5564.1/day over 52 days (+0.2%)",yes,1.3
+BR9,Manager,activity windows (28 days vs the 28 before) equal the Pandas table; the alerts compare them,"active users -0.3% (limit -10%), active titles +0.0% (limit -10%); genre week on week -3.5% (Thriller) to +3.3% (Comedy), limit -10%; 0 of 3 alerts firing",yes,1.6
+BR9,Manager,alert limits sit above the normal window-to-window noise (reference date slid back 0-57 days),active users -0.5% to +0.4%; active titles -3.0% to +0.1%; limits -10% / -10%,yes,0.0
