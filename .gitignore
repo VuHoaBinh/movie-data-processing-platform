@@ -4,3 +4,11 @@ __pycache__/
 data/processed/
 data/processed_spark/
 .streamlit/
+data/warehouse/
+data/batch_refresh.log
+benchmarks/tmp/
+benchmarks/.venv/
+.pytest_cache/
+metastore_db/
+derby.log
+spark-warehouse/

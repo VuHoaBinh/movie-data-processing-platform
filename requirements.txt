@@ -1,4 +1,5 @@
+kafka-python>=2.0.2
 pandas>=2.0
 streamlit>=1.37
 plotly>=5.18
-kafka-python>=2.0.2
+cassandra-driver==3.29.2

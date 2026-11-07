@@ -1,3 +1,4 @@
-﻿# Install after the base requirements when running the Spark batch job.
-# For local Spark execution, Java must also be installed and available on PATH.
-pyspark>=3.5
+# Install after the base requirements when running the Spark batch job.
+# For local Spark execution, Java 11/17 must also be installed and available on PATH.
+# Pinned: spark-cassandra-connector 3.5.1 (Scala 2.12) targets Spark 3.5.x.
+pyspark==3.5.3
