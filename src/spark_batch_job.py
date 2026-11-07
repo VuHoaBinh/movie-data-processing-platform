@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from pyspark.sql import DataFrame, SparkSession, functions as F, Window
-from pyspark.sql.types import DateType, DoubleType, IntegerType, StringType, StructField, StructType
+from pyspark.sql.types import DateType, DoubleType, IntegerType, LongType, StringType, StructField, StructType
 
 from src.data_quality import clean_spark, format_report, report_from_rows
 
@@ -79,12 +79,27 @@ def read_raw(spark: SparkSession, raw_dir: Path) -> tuple[DataFrame, ...]:
     missing = [name for name in RAW_FILES if not (raw_dir / name).is_file()]
     if missing:
         raise FileNotFoundError(f"Missing raw files in {raw_dir}: {', '.join(missing)}")
-    return tuple(
-        spark.read.option("header", True).option("nullValue", "").schema(
-            RAW_SCHEMAS[Path(name).stem]
-        ).csv(str(raw_dir / name))
-        for name in RAW_FILES
-    )
+    def read_file(name: str) -> DataFrame:
+        # TextInputFormat exposes the byte offset in this uncompressed source file.
+        # Unlike partition-derived IDs, it survives reshuffles and Hive writes.
+        lines = spark.sparkContext.newAPIHadoopFile(
+            str(raw_dir / name),
+            "org.apache.hadoop.mapreduce.lib.input.TextInputFormat",
+            "org.apache.hadoop.io.LongWritable", "org.apache.hadoop.io.Text",
+        ).map(lambda row: (int(row[0]), str(row[1])))
+        line_schema = StructType([
+            StructField("_source_offset", LongType(), False),
+            StructField("_csv_line", StringType(), False),
+        ])
+        source = spark.createDataFrame(lines, line_schema).where(
+            (F.col("_source_offset") > 0) & (F.length(F.trim("_csv_line")) > 0)
+        )
+        return source.select(
+            "_source_offset",
+            F.from_csv("_csv_line", RAW_SCHEMAS[Path(name).stem], {"nullValue": ""}).alias("_record"),
+        ).select("_source_offset", "_record.*")
+
+    return tuple(read_file(name) for name in RAW_FILES)
 
 
 def curate(

@@ -37,6 +37,13 @@ def main() -> None:
             'scan.startup.mode' = 'earliest-offset', 'format' = 'json',
             'json.ignore-parse-errors' = 'false', 'json.fail-on-missing-field' = 'true'
         )""")
+    # Exclude events without usable identifiers before they enter a window.
+    table_env.execute_sql("""
+        CREATE TEMPORARY VIEW valid_watch_events AS
+        SELECT * FROM watch_events
+        WHERE movie_id IS NOT NULL AND TRIM(movie_id) <> ''
+          AND user_id IS NOT NULL AND TRIM(user_id) <> ''
+    """)
     table_env.execute_sql(f"""
         CREATE TABLE trending_results (
             movie_id STRING, title STRING, genre STRING,
@@ -51,7 +58,7 @@ def main() -> None:
         SELECT movie_id, MAX(title), MAX(genre),
                UNIX_TIMESTAMP(CAST(window_start AS STRING)) * 1000,
                COUNT(*), COUNT(DISTINCT user_id)
-        FROM TABLE(TUMBLE(TABLE watch_events, DESCRIPTOR(event_time), INTERVAL '{window_seconds}' SECOND(6)))
+        FROM TABLE(TUMBLE(TABLE valid_watch_events, DESCRIPTOR(event_time), INTERVAL '{window_seconds}' SECOND(6)))
         GROUP BY movie_id, window_start, window_end""")
     result.wait()
 

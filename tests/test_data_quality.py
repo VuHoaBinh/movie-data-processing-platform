@@ -129,6 +129,21 @@ def test_rule_precedence_spark(spark, hand_dir):
         assert report[table] == expected, table
 
 
+@pytest.mark.spark
+def test_duplicate_retains_first_source_row_after_repartition(spark, hand_dir):
+    from src.batch_processing import read_raw as read_pandas
+    from src.data_quality import clean_pandas, report_from_rows
+    from src.spark_batch_job import curate, read_raw as read_spark
+
+    with (hand_dir / "ratings.csv").open("a", encoding="utf-8") as output:
+        output.write("R1,U1,M1,1,2026-01-01 10:00:00\n")
+    pandas_frames, pandas_report = clean_pandas(*read_pandas(hand_dir))
+    spark_frames, report = curate(*(frame.repartition(3) for frame in read_spark(spark, hand_dir)))
+    assert pandas_frames[2].set_index("rating_id").loc["R1", "rating"] == 5
+    assert spark_frames[2].where("rating_id = 'R1'").first()["rating"] == 5
+    assert report_from_rows([tuple(row) for row in report.collect()]) == pandas_report
+
+
 def test_clean_data_loses_no_rows(clean_dir):
     _, report = pandas_tables(clean_dir)
     for counts in report.values():

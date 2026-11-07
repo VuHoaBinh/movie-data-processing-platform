@@ -142,7 +142,9 @@ def _tag_table_spark(
 
     id_column = ID_COLUMN[table]
     required = REQUIRED[table] or [c for c in frame.columns if not c.startswith("_")]
-    order = Window.partitionBy(id_column).orderBy(F.monotonically_increasing_id())
+    if "_source_offset" not in frame.columns:
+        raise ValueError("Spark data-quality input requires _source_offset from the source CSV")
+    order = Window.partitionBy(id_column).orderBy(F.col("_source_offset"))
     frame = frame.withColumn("_rn", F.row_number().over(order))
     # Orphan checks: flag columns come from left joins against the distinct valid ids.
     if users is not None and table in TIME_COLUMN:
