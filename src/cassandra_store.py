@@ -17,6 +17,26 @@ KEYSPACE = os.getenv("CASSANDRA_KEYSPACE", "movie_analytics")
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "sql" / "cassandra_schema.cql"
 BATCH_BUCKET = "all"
 
+# CQL bind markers cannot represent identifiers. Keep queries static so that
+# callers cannot inject CQL through a table name.
+COUNT_QUERIES = {
+    "movie_performance": "SELECT COUNT(*) AS n FROM movie_performance",
+    "movies_by_genre_rating": "SELECT COUNT(*) AS n FROM movies_by_genre_rating",
+    "top_rated_movies": "SELECT COUNT(*) AS n FROM top_rated_movies",
+    "top_viewed_movies": "SELECT COUNT(*) AS n FROM top_viewed_movies",
+    "low_engagement_movies": "SELECT COUNT(*) AS n FROM low_engagement_movies",
+    "genre_popularity": "SELECT COUNT(*) AS n FROM genre_popularity",
+    "subscription_views": "SELECT COUNT(*) AS n FROM subscription_views",
+    "user_engagement": "SELECT COUNT(*) AS n FROM user_engagement",
+    "hourly_views": "SELECT COUNT(*) AS n FROM hourly_views",
+    "user_segments": "SELECT COUNT(*) AS n FROM user_segments",
+    "user_preferences": "SELECT COUNT(*) AS n FROM user_preferences",
+    "daily_views": "SELECT COUNT(*) AS n FROM daily_views",
+    "summary_metrics": "SELECT COUNT(*) AS n FROM summary_metrics",
+    "live_trending": "SELECT COUNT(*) AS n FROM live_trending",
+    "live_trending_spark": "SELECT COUNT(*) AS n FROM live_trending_spark",
+}
+
 
 class CassandraUnavailable(RuntimeError):
     """Raised when the cluster cannot be reached, with a message fit for the UI."""
@@ -78,7 +98,10 @@ def query_frame(session: Session, cql: str, params: Sequence[Any] | None = None)
 
 
 def table_counts(session: Session, tables: Sequence[str]) -> dict[str, int]:
-    return {table: session.execute(f"SELECT COUNT(*) AS n FROM {table}").one()["n"] for table in tables}
+    unknown = set(tables) - COUNT_QUERIES.keys()
+    if unknown:
+        raise ValueError(f"Unknown Cassandra tables: {sorted(unknown)}")
+    return {table: session.execute(COUNT_QUERIES[table]).one()["n"] for table in tables}
 
 
 def main() -> None:

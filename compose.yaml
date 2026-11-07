@@ -20,7 +20,11 @@ services:
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_NUM_PARTITIONS: 1
     healthcheck:
-      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1",
+        ]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -39,7 +43,7 @@ services:
   cassandra:
     image: cassandra:5.0
     ports:
-      - "9042:9042"
+      - "127.0.0.1:9042:9042" # giảm khả năng client từ máy khác truy cập qua cổng được xuất trên host.
     environment:
       CASSANDRA_CLUSTER_NAME: movie-analytics
       MAX_HEAP_SIZE: 1G
@@ -117,7 +121,7 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       KAFKA_WATCH_TOPIC: watch-events
       KAFKA_TREND_TOPIC: trending-results
-      TREND_WINDOW_MINUTES: 5
+      TREND_WINDOW_SECONDS: ${TREND_WINDOW_SECONDS:-300}
     depends_on:
       flink-jobmanager:
         condition: service_healthy
@@ -129,7 +133,15 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.stream
-    command: ["python", "src/kafka_event_producer.py", "--limit", "100000", "--rate", "500"]
+    command:
+      [
+        "python",
+        "src/kafka_event_producer.py",
+        "--limit",
+        "100000",
+        "--rate",
+        "500",
+      ]
     volumes:
       - ./data:/app/data:ro
     environment:
@@ -169,7 +181,7 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       KAFKA_WATCH_TOPIC: watch-events
       CASSANDRA_HOST: cassandra
-      TREND_WINDOW_MINUTES: 5
+      TREND_WINDOW_SECONDS: ${TREND_WINDOW_SECONDS:-300}
       TRENDING_TABLE: live_trending_spark
     depends_on:
       kafka-init:

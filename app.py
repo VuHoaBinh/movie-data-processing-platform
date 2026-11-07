@@ -112,7 +112,9 @@ def render_live_trending() -> None:
     if live.empty:
         st.info("Waiting for Flink to complete the first five-minute window.")
         return
-    latest_time = pd.Timestamp(live["window_start"].max()).tz_localize("UTC")
+    latest_window = live["window_start"].max()
+    live = live.loc[live["window_start"] == latest_window]
+    latest_time = pd.Timestamp(latest_window).tz_localize("UTC")
     if pd.Timestamp.now(tz="UTC") - latest_time > pd.Timedelta(minutes=10):
         st.info(f"Waiting for a fresh Flink result. Last result: {latest_time.isoformat()}")
         return
