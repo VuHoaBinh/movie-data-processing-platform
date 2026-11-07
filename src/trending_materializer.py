@@ -45,7 +45,7 @@ def consume_results() -> None:
     consumer = KafkaConsumer(
         TOPIC,
         bootstrap_servers=BOOTSTRAP,
-        group_id="movie-trending-dashboard-materializer",
+        group_id=os.getenv("MATERIALIZER_GROUP", "movie-trending-dashboard-materializer"),
         auto_offset_reset="earliest",
         enable_auto_commit=True,
         value_deserializer=lambda value: json.loads(value.decode("utf-8")),
