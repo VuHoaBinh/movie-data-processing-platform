@@ -54,8 +54,8 @@ Bộ sinh còn có một tuỳ chọn `--dirty-rate` chèn có chủ đích bả
 |---|---|---|
 | Hive/Parquet `raw.*` | Bản sao Parquet của 4 CSV, schema tường minh, timestamp còn là chuỗi | 28,8 MB |
 | Hive/Parquet `curated.*` | Đã làm sạch bằng 7 luật, timestamp UTC; `curated.watch_events` phân vùng theo `watch_date`; thêm `curated.quality_report` | 29,7 MB |
-| Hive/Parquet `analytics.*` | 12 bảng tổng hợp phục vụ dashboard (10 bảng gốc, `user_recommendations`, `user_recommendations_als`) | 6,2 MB |
-| Cassandra `movie_analytics` | 18 bảng do batch ghi theo mô hình query-first (15 bảng của dashboard gồm hai bảng gợi ý, `quality_report`, và hai bảng siêu dữ liệu `batch_table_rows`, `batch_runs`), cộng 2 bảng `live_trending`, `live_trending_spark` cho stream | 31,4 MB cho cả keyspace, không tính snapshot (RF=1; hai bảng gợi ý chiếm 11,4 và 12,8 MB) |
+| Hive/Parquet `analytics.*` | 21 bảng tổng hợp phục vụ dashboard (20 bảng dùng chung với Pandas, `user_recommendations_als`) | 7,2 MB (`storage_footprint.md`) |
+| Cassandra `movie_analytics` | 28 bảng do batch ghi theo mô hình query-first (25 bảng của dashboard, `quality_report` và hai bảng siêu dữ liệu `batch_table_rows`, `batch_runs`), cộng 2 bảng `live_trending`, `live_trending_spark` cho stream | 43,6 MB cho cả keyspace, không tính snapshot (RF=1) |
 
 Luồng: `CSV → raw → curated → analytics → Cassandra` (`src/spark_batch_job.py`, hàm `run`). Cassandra là bản phục vụ có thể dựng lại bất cứ lúc nào.
 
@@ -82,7 +82,7 @@ Sự toàn vẹn khoá ngoại và tính duy nhất khoá chính được kiểm
 mọi `orphans` bằng 0. Khoá ngoại không được cơ sở dữ liệu ép buộc (CSV không có ràng buộc); luật `orphan_user` và `orphan_movie`
 trong `src/data_quality.py` thay vai trò đó khi làm sạch.
 
-Lược đồ phục vụ trong Cassandra (18 bảng do batch ghi, gồm hai bảng gợi ý, `quality_report` và 2 bảng siêu dữ liệu, cộng 2 bảng stream) nằm trong `sql/cassandra_schema.cql`; ánh xạ BR → bảng ở `docs/storage_decision.md` và mục 4 của `docs/business_requirements.md`.
+Lược đồ phục vụ trong Cassandra (28 bảng do batch ghi, gồm hai bảng gợi ý và chín bảng của BR2/BR8/BR9/BR10, `quality_report` và 2 bảng siêu dữ liệu, cộng 2 bảng stream) nằm trong `sql/cassandra_schema.cql`; ánh xạ BR → bảng ở `docs/storage_decision.md` và mục 4 của `docs/business_requirements.md`.
 
 ## 3. Đặc điểm Big Data
 
@@ -92,8 +92,8 @@ Lược đồ phục vụ trong Cassandra (18 bảng do batch ghi, gồm hai b�
 |---|---|---|
 | Số dòng | users 50.000; movies 20.000; ratings 500.000; watch_history 1.000.000 | `data_profile.md` |
 | CSV thô | 74,3 MB (watch_history 49,28 MB; ratings 21,46 MB) | `storage_footprint.md`, `data_profile.md` |
-| Parquet raw / curated / analytics | 28,8 / 29,7 / 6,2 MB | `storage_footprint.md` |
-| Cassandra (cả keyspace, không tính snapshot, RF=1, nén LZ4) | 31,4 MB | `storage_footprint.md` |
+| Parquet raw / curated / analytics | 28,0 / 29,6 / 7,2 MB | `storage_footprint.md` |
+| Cassandra (cả keyspace, không tính snapshot, RF=1, nén LZ4) | 43,6 MB | `storage_footprint.md` |
 | Khoảng thời gian | 180 ngày (2026-04-01 đến 2026-09-27) | `data_profile.md` |
 | Thời gian batch đầy đủ (1M dòng xem) | 337,3 s | `load_times.md` |
 | Pandas / Spark ở 1M và 5M dòng xem | 15,3 s / 58,5 s và 31,5 s / 104,7 s; RAM đỉnh 592 / 3.602 MB và 2.192 / 4.393 MB | `batch_engines.md` |
@@ -132,7 +132,7 @@ trung bình khoảng 0,064 sự kiện/s (tính từ 1.000.000 / (180 × 86.400)
 | CSV | 4 nguồn batch | Dạng bảng, có header, timestamp là chuỗi (mọi giá trị trong `data/` đều parse được; xem 4.3) |
 | JSON | `watch-events`, `trending-results` | Bán cấu trúc, mỗi sự kiện một thông điệp; Flink đọc bằng `format = json` và bỏ qua thông điệp lỗi (`json.ignore-parse-errors`) |
 | Parquet trên Hive | `raw.*`, `curated.*`, `analytics.*` | Dạng cột, nén, schema trong metastore; `curated.watch_events` phân vùng theo ngày |
-| Cassandra wide rows | 18 bảng do batch ghi + 2 bảng live | Một partition chứa nhiều dòng sắp xếp sẵn theo clustering key (ví dụ `live_trending`: partition là ngày, sắp theo `window_start DESC, rank`) |
+| Cassandra wide rows | 28 bảng do batch ghi + 2 bảng live | Một partition chứa nhiều dòng sắp xếp sẵn theo clustering key (ví dụ `live_trending`: partition là ngày, sắp theo `window_start DESC, rank`) |
 
 ### 3.4 Veracity (độ tin cậy)
 
@@ -158,15 +158,15 @@ và 714 × 7 = 4.998 = 104.998 − 100.000 ở `watch_history`). Bộ kiểm th�
 | BR | Dữ liệu dùng | Cột chính |
 |---|---|---|
 | BR1 | `movies`, `watch_history` | `title`, `genre`, `release_year`, `duration`, số lượt xem |
-| BR2 | `watch_history`, `movies`; stream: `watch-events` | `movie_id`, số lượt xem; stream: `movie_id`, `user_id`, `title`, `genre`, event time |
+| BR2 | `watch_history`, `movies`; stream: `watch-events` | `movie_id`, số lượt xem toàn thời gian và trong hai cửa sổ 7 ngày; stream: `movie_id`, `user_id`, `title`, `genre`, event time |
 | BR3 | `watch_history`, `movies`, `ratings` | `user_id`, `genre` (thể loại xem nhiều nhất), `rating` |
 | BR4 | `ratings`, `movies` | `rating`, `movie_id` |
 | BR5 | `watch_history`, `movies` | `genre`, `user_id` |
 | BR6 | `watch_history`, `users` | `user_id`, `watch_duration`, `watch_timestamp`, `subscription_plan` |
 | BR7 | `watch_history`, `ratings`, `movies` | `watch_duration`, `duration`, `rating` |
-| BR8 | `watch_history`, `movies` | số lượt xem, `completion_rate` |
-| BR9 | `watch_history`, `users` | số lượt xem mỗi user |
-| BR10 | `watch_history` | `watch_timestamp` |
+| BR8 | `watch_history`, `movies` | số lượt xem, `completion_rate`, `genre` (nhóm đồng đẳng) |
+| BR9 | `watch_history`, `users` | số lượt xem mỗi user; `activity_profile` (chỉ để đối chiếu) |
+| BR10 | `watch_history`, `movies` | `watch_timestamp`, `movie_id`, `genre` |
 
 Chi tiết từng BR (bảng, truy vấn, mã) ở `docs/business_requirements.md`.
 
@@ -196,7 +196,7 @@ Danh mục phân bố đều giữa 8 thể loại (từ 2.496 đến 2.505 phim
 * Khoảng thời gian 180 ngày, 180 ngày đều có sự kiện, số sự kiện/ngày min / trung vị / max là 5.318 / 5.556,5 / 5.731: số lượng theo ngày gần như phẳng.
 * Giờ trong ngày có bậc thang rõ rệt: giờ 20 có 116.720 lượt, giờ 01 có 7.780 lượt (gấp 15 lần, tính từ hai số này); năm giờ từ 17 đến 21 chiếm khoảng 56,1% (tính từ 9,52 + 11,66 + 11,63 + 11,67 + 11,66).
 * Cuối tuần: 52 ngày cuối tuần, 28,93% sự kiện; trung bình mỗi ngày cuối tuần 5.564,1 sự kiện so với 5.552,1 ngày thường, tức **không có hiệu ứng cuối tuần ở mức ngày**; bộ sinh chỉ dịch giờ xem về buổi tối (18-23 giờ) vào cuối tuần.
-* Đặc điểm này của bộ sinh có nghĩa là biểu đồ BR10 (xu hướng theo ngày) gần như đường phẳng, ít kể được câu chuyện kinh doanh.
+* Đặc điểm này của bộ sinh có nghĩa là biểu đồ BR10 (xu hướng theo ngày, theo thể loại, trung bình trượt 7 ngày, ngày thường so với cuối tuần) gần như đường phẳng, ít kể được câu chuyện kinh doanh; danh sách "đang lên" của BR2 chủ yếu phản ánh dao động ngẫu nhiên giữa hai tuần.
 
 ### 4.3 Phân phối điểm đánh giá và độ phủ
 
@@ -226,7 +226,7 @@ Mỗi dòng nêu phát hiện, quyết định thiết kế bị nó chi phối 
 | 7 | Ít đánh giá mỗi phim: trung vị 13, nhỏ nhất 1 (`data_profile.md`) | Xếp hạng bằng điểm trung bình có trọng số kiểu Bayesian (kéo về trung bình toàn cục, trọng số trước m = trung vị số đánh giá) để phim có 1-2 đánh giá không đứng đầu; kết quả đo: phim top-10 có ít nhất 169 đánh giá (`br_effectiveness.md`) | `src/spark_batch_job.py` (`build_tables`, biến `min_votes`), `src/batch_processing.py` |
 | 8 | 21 phim chưa có đánh giá (`data_profile.md`) | `weighted_rating` là null và loại khỏi các bảng xếp hạng đánh giá (`top_rated_movies`, `movies_by_genre_rating`) nhưng vẫn nằm trong `movie_performance` | `src/spark_batch_job.py` (`serving_frames`, biến `rated`) |
 | 9 | 168 user (0,34%) chưa có lượt xem (`data_profile.md`) | Giữ mọi user ở `user_engagement` bằng phép join trái và đưa vào phân khúc Inactive; `user_recommendations` bù cho user không có sở thích (cold start) bằng 10 phim xem nhiều nhất (cột `source = 'popular'`), còn ALS không có dòng nào cho họ và dashboard chuyển về danh sách theo thể loại | `src/spark_batch_job.py` (`build_tables`), `src/recommendations.py` (`recommend_spark`), `app.py` (`viewer_page`) |
-| 10 | Phân phối lượt xem mỗi user kéo dài: p50 12, p90 45; 42,18% user ≤ 10 lượt (`data_profile.md`) | Phân khúc theo ngưỡng cố định 10 và 35 lượt xem; hai ngưỡng này không rút ra từ dữ liệu mà là quy ước, và nên được đặt lại bằng phân vị khi dữ liệu thật có phân phối khác | `src/spark_batch_job.py` (`build_tables`, cột `segment`), `src/batch_processing.py` |
+| 10 | Phân phối lượt xem mỗi user kéo dài: p50 12, p90 45; 42,18% user ≤ 10 lượt (`data_profile.md`) | Phân khúc theo phân vị 25 và 75 của lượt xem mỗi user (ngưỡng tính trong batch, lưu ở `segment_thresholds`), thay cho hai hằng số 10 và 35; ma trận đối chiếu với `activity_profile` đo mức khớp | `src/spark_batch_job.py` (`user_segment_tables`), `src/batch_processing.py` (`build_tables`), `src/business_rules.py` |
 | 11 | Dữ liệu thật thường bẩn còn dữ liệu sinh ra sạch (0 dòng bị loại, `data_quality_real.txt`) | Tách bước `curated` có luật chất lượng đếm từng loại lỗi và lưu vào `curated.quality_report`; chứng minh luật bằng dữ liệu bẩn có chủ đích | `src/data_quality.py`, `generate_data.py` (`inject_dirty_rows`) |
 | 12 | Truy vấn theo khoá cần 1-2 ms trên Cassandra nhưng 240-650 ms trên Spark SQL; quét 50.000 dòng thì hoà (382 ms so với 383 ms) (`storage_latency.md`) | Dùng hai lớp: Cassandra phục vụ truy vấn theo khoá/top-N, Hive/Parquet cho lưu trữ lịch sử, tính lại và truy vấn ad hoc | `docs/storage_decision.md` |
 | 13 | Parquet nhỏ hơn CSV khoảng 2,6 lần (74,3 MB so với 28,8 MB, tính từ `storage_footprint.md`) | Lưu vùng raw/curated dạng Parquet cột nén thay vì giữ CSV | `src/spark_batch_job.py` (`_save_hive`) |
