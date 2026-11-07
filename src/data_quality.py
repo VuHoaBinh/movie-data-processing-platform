@@ -62,6 +62,10 @@ def _tag_pandas(frame: pd.DataFrame, table: str, rules: dict[str, pd.Series]) ->
 def _clean_table_pandas(
     frame: pd.DataFrame, table: str, now: datetime, users: pd.DataFrame | None, movies: pd.DataFrame | None
 ) -> tuple[pd.DataFrame, dict[str, int]]:
+    frame = frame.copy()
+    for column in {"movies": ("duration", "release_year"), "ratings": ("rating",),
+                   "watch_history": ("watch_duration",)}.get(table, ()):
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
     required = REQUIRED[table] or [c for c in frame.columns if not c.startswith("_")]
     rules: dict[str, pd.Series] = {
         "duplicate_id": frame.duplicated(ID_COLUMN[table], keep="first"),
@@ -75,6 +79,10 @@ def _clean_table_pandas(
         rules["invalid_value"] = ~frame["rating"].between(1, 5)
     elif table == "watch_history":
         rules["invalid_value"] = frame["watch_duration"] <= 0
+    integer_columns = {"movies": ("duration", "release_year"), "ratings": ("rating",),
+                       "watch_history": ("watch_duration",)}.get(table, ())
+    for column in integer_columns:
+        rules["invalid_value"] = rules["invalid_value"] | (frame[column] % 1 != 0)
     if table in TIME_COLUMN:
         rules["future_timestamp"] = frame[TIME_COLUMN[table]] > pd.Timestamp(now)
     if users is not None and "user_id" in frame and table in TIME_COLUMN:
@@ -153,6 +161,10 @@ def _tag_table_spark(
         rules["invalid_value"] = ~F.col("rating").between(1, 5)
     elif table == "watch_history":
         rules["invalid_value"] = F.col("watch_duration") <= 0
+    integer_columns = {"movies": ("duration", "release_year"), "ratings": ("rating",),
+                       "watch_history": ("watch_duration",)}.get(table, ())
+    for column in integer_columns:
+        rules["invalid_value"] = rules["invalid_value"] | (F.col(column) % 1 != 0)
     if table in TIME_COLUMN:
         rules["future_timestamp"] = F.col(TIME_COLUMN[table]) > F.lit(now.strftime("%Y-%m-%d %H:%M:%S")).cast("timestamp")
         rules["orphan_user"] = F.col("_has_user").isNull()
@@ -181,6 +193,9 @@ def clean_spark(
         # Fact tables are checked against the already-cleaned dimension tables.
         tagged[table] = _tag_table_spark(frame, table, now, clean.get("users"), clean.get("movies"))
         clean[table] = tagged[table].where(F.col("_reason").isNull()).select(*columns[table])
+        for column in {"movies": ("duration", "release_year"), "ratings": ("rating",),
+                       "watch_history": ("watch_duration",)}.get(table, ()):
+            clean[table] = clean[table].withColumn(column, F.col(column).cast("int"))
     report = None
     for table in TABLES:
         counts = tagged[table].groupBy(F.coalesce("_reason", F.lit("accepted")).alias("reason")).agg(

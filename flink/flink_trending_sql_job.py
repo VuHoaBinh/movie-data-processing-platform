@@ -34,7 +34,8 @@ def main() -> None:
         ) WITH (
             'connector' = 'kafka', 'topic' = '{source_topic}',
             'properties.bootstrap.servers' = '{brokers}', 'properties.group.id' = 'movie-trending-flink-sql',
-            'scan.startup.mode' = 'earliest-offset', 'format' = 'json', 'json.ignore-parse-errors' = 'true'
+            'scan.startup.mode' = 'earliest-offset', 'format' = 'json',
+            'json.ignore-parse-errors' = 'false', 'json.fail-on-missing-field' = 'true'
         )""")
     table_env.execute_sql(f"""
         CREATE TABLE trending_results (

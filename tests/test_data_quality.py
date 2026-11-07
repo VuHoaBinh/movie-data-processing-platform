@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from src.data_quality import REASONS
@@ -62,6 +63,63 @@ def test_rule_precedence_pandas(hand_dir):
     for table, expected in expected_hand_report().items():
         assert report[table] == expected, table
     assert report["users"]["output"] == 4 and report["movies"]["output"] == 4
+
+
+def test_nonnumeric_values_are_reported_by_clean_pandas(hand_dir):
+    from src.batch_processing import read_raw
+    from src.data_quality import clean_pandas
+
+    users, movies, ratings, watches = read_raw(hand_dir)
+    ratings["rating"] = ratings["rating"].astype(object)
+    watches["watch_duration"] = watches["watch_duration"].astype(object)
+    ratings.loc[ratings["rating_id"] == "R1", "rating"] = "invalid"
+    watches.loc[watches["watch_id"] == "W1", "watch_duration"] = "invalid"
+    _, report = clean_pandas(users, movies, ratings, watches)
+    assert report["ratings"]["null_value"] == 2
+    assert report["watch_history"]["null_value"] == 2
+
+
+def add_null_token_watches(raw_dir):
+    with (raw_dir / "watch_history.csv").open("a", encoding="utf-8") as output:
+        output.write("W9,U1,M1,2026-01-01 10:00:00,60,NA\n")
+        output.write("W10,U1,M1,2026-01-01 10:00:00,60,NULL\n")
+        output.write("W11,U1,M1,2026-01-01 10:00:00,60,\n")
+
+
+def test_null_tokens_pandas(hand_dir):
+    from src.batch_processing import read_raw
+
+    add_null_token_watches(hand_dir)
+    watches = read_raw(hand_dir)[3].set_index("watch_id")
+    assert watches.loc["W9", "device"] == "NA"
+    assert watches.loc["W10", "device"] == "NULL"
+    assert pd.isna(watches.loc["W11", "device"])
+    assert pandas_tables(hand_dir)[1]["watch_history"]["null_value"] == 2
+
+
+@pytest.mark.spark
+def test_null_tokens_match_spark(spark, hand_dir):
+    add_null_token_watches(hand_dir)
+    assert pandas_tables(hand_dir)[1] == spark_tables(spark, hand_dir)[1]
+
+
+def test_fractional_values_are_rejected_pandas(hand_dir):
+    with (hand_dir / "ratings.csv").open("a", encoding="utf-8") as output:
+        output.write("R9,U1,M1,3.5,2026-01-01 10:00:00\n")
+    with (hand_dir / "watch_history.csv").open("a", encoding="utf-8") as output:
+        output.write("W9,U1,M1,2026-01-01 10:00:00,1.5,Web\n")
+    _, report = pandas_tables(hand_dir)
+    assert report["ratings"]["invalid_value"] == 3
+    assert report["watch_history"]["invalid_value"] == 3
+
+
+@pytest.mark.spark
+def test_fractional_values_are_rejected_by_both_engines(spark, hand_dir):
+    with (hand_dir / "ratings.csv").open("a", encoding="utf-8") as output:
+        output.write("R9,U1,M1,3.5,2026-01-01 10:00:00\n")
+    with (hand_dir / "watch_history.csv").open("a", encoding="utf-8") as output:
+        output.write("W9,U1,M1,2026-01-01 10:00:00,1.5,Web\n")
+    assert pandas_tables(hand_dir)[1] == spark_tables(spark, hand_dir)[1]
 
 
 @pytest.mark.spark

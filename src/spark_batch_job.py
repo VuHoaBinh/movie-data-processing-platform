@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from pyspark.sql import DataFrame, SparkSession, functions as F, Window
-from pyspark.sql.types import DateType, IntegerType, StringType, StructField, StructType
+from pyspark.sql.types import DateType, DoubleType, IntegerType, StringType, StructField, StructType
 
 from src.data_quality import clean_spark, format_report, report_from_rows
 
@@ -28,19 +28,19 @@ RAW_SCHEMAS = {
     ]),
     "movies": StructType([
         StructField("movie_id", StringType()), StructField("title", StringType()),
-        StructField("genre", StringType()), StructField("release_year", IntegerType()),
-        StructField("duration", IntegerType()), StructField("content_type", StringType()),
+        StructField("genre", StringType()), StructField("release_year", DoubleType()),
+        StructField("duration", DoubleType()), StructField("content_type", StringType()),
         StructField("language", StringType()), StructField("maturity_rating", StringType()),
     ]),
     "ratings": StructType([
         StructField("rating_id", StringType()), StructField("user_id", StringType()),
-        StructField("movie_id", StringType()), StructField("rating", IntegerType()),
+        StructField("movie_id", StringType()), StructField("rating", DoubleType()),
         StructField("timestamp", StringType()),
     ]),
     "watch_history": StructType([
         StructField("watch_id", StringType()), StructField("user_id", StringType()),
         StructField("movie_id", StringType()), StructField("watch_timestamp", StringType()),
-        StructField("watch_duration", IntegerType()), StructField("device", StringType()),
+        StructField("watch_duration", DoubleType()), StructField("device", StringType()),
     ]),
 }
 
@@ -80,7 +80,9 @@ def read_raw(spark: SparkSession, raw_dir: Path) -> tuple[DataFrame, ...]:
     if missing:
         raise FileNotFoundError(f"Missing raw files in {raw_dir}: {', '.join(missing)}")
     return tuple(
-        spark.read.option("header", True).schema(RAW_SCHEMAS[Path(name).stem]).csv(str(raw_dir / name))
+        spark.read.option("header", True).option("nullValue", "").schema(
+            RAW_SCHEMAS[Path(name).stem]
+        ).csv(str(raw_dir / name))
         for name in RAW_FILES
     )
 
@@ -362,12 +364,13 @@ def run(
             (users, movies, ratings, watches), quality = curate(*(spark.table(f"raw.{name}") for name in RAW_SCHEMAS))
             quality = quality.cache()
             print(format_report(report_from_rows([tuple(row) for row in quality.collect()])))
-            _save_hive(quality, "curated.quality_report")
             watches = watches.withColumn("watch_date", F.to_date("watch_timestamp"))
             _save_hive(users, "curated.users")
             _save_hive(movies, "curated.movies")
             _save_hive(ratings, "curated.ratings")
             _save_hive(watches.repartition("watch_date"), "curated.watch_events", partition_by="watch_date")
+            # Publish the report only after all curated-table writes have succeeded.
+            _save_hive(quality, "curated.quality_report")
             clock = _timed("hive_curated", clock)
             curated = tuple(
                 spark.table(f"curated.{name}") for name in ("users", "movies", "ratings", "watch_events")

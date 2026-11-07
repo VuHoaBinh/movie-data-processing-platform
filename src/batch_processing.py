@@ -18,10 +18,15 @@ def read_raw(raw_dir: Path) -> tuple[pd.DataFrame, ...]:
     if missing:
         raise FileNotFoundError(f"Missing raw files in {raw_dir}: {', '.join(missing)}")
 
-    users = pd.read_csv(raw_dir / "users.csv")
-    movies = pd.read_csv(raw_dir / "movies.csv")
-    ratings = pd.read_csv(raw_dir / "ratings.csv")
-    watches = pd.read_csv(raw_dir / "watch_history.csv")
+    # Match Spark CSV: empty fields are missing; tokens such as NA and NULL are text.
+    users, movies, ratings, watches = (
+        pd.read_csv(raw_dir / name, keep_default_na=False, na_values=[""])
+        for name in RAW_FILES
+    )
+    for frame, columns in ((movies, ("release_year", "duration")),
+                           (ratings, ("rating",)), (watches, ("watch_duration",))):
+        for column in columns:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
     for frame, column in ((ratings, "timestamp"), (watches, "watch_timestamp")):
         parsed = parse_timestamps(frame[column])
         frame["_bad_ts"] = frame[column].notna() & parsed.isna()  # text present but unparseable

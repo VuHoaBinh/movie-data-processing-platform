@@ -66,4 +66,5 @@ def test_live_trending_tables_keep_ranks_one_to_ten(session):
         windows = {}
         for row in session.execute(f"SELECT day, window_start, rank FROM {table} LIMIT 2000"):
             windows.setdefault(row["window_start"], []).append(row["rank"])
+        assert windows, f"{table} contains no trending windows"
         assert all(sorted(ranks) == list(range(1, len(ranks) + 1)) and len(ranks) <= 10 for ranks in windows.values())
