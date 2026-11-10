@@ -12,3 +12,7 @@ benchmarks/.venv/
 metastore_db/
 derby.log
 spark-warehouse/
+.DS_Store
+benchmarks/results/*
+!benchmarks/results/.gitkeep
+data/bench/

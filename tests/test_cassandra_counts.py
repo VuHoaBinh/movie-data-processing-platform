@@ -10,7 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from src.cassandra_store import CassandraUnavailable, connect, table_counts
+from src import settings
+from src.cassandra_store import CassandraUnavailable, connect, serving_state, table_counts
 from tests.helpers import pandas_tables
 
 pytestmark = pytest.mark.integration
@@ -22,6 +23,20 @@ def session():
         return connect(timeout=5)
     except CassandraUnavailable as error:
         pytest.skip(str(error))
+
+
+def batch_tables(session) -> dict:
+    """Pandas twin over the same input as the Spark run: CSV without the replay day + closed archived days.
+
+    The archive must not have grown since the batch run (stop the producer, or compare right after a run).
+    """
+    row = serving_state(session)
+    as_date = lambda value: None if value is None else value.date()  # cassandra.util.Date
+    tables, _ = pandas_tables(
+        Path(os.getenv("RAW_DIR", "data")), replay_day=as_date(row["replay_day"]),
+        batch_cutoff=as_date(row["batch_cutoff"]), archive_dir=settings.ARCHIVE_DIR,
+    )
+    return tables
 
 
 def expected_counts(tables: dict) -> dict[str, int]:
@@ -42,18 +57,23 @@ def expected_counts(tables: dict) -> dict[str, int]:
         "user_preferences": len(tables["user_preferences"]),
         "daily_views": len(tables["daily_views"]),
         "summary_metrics": 1,
+        "genre_monthly": len(tables["genre_monthly"]),
+        "user_recommendations": len(tables["user_recommendations"]),
+        "rating_distribution": len(tables["rating_distribution"]),
+        "view_trends": len(tables["view_trends"]),
     }
 
 
 def test_cassandra_row_counts_match_batch_output(session):
-    tables, _ = pandas_tables(Path(os.getenv("RAW_DIR", "data")))
-    expected = expected_counts(tables)
+    expected = expected_counts(batch_tables(session))
     assert table_counts(session, list(expected)) == expected
 
 
 def test_summary_metrics_match_raw_data(session):
-    tables, _ = pandas_tables(Path(os.getenv("RAW_DIR", "data")))
-    row = session.execute("SELECT * FROM summary_metrics WHERE bucket = 'all'").one()
+    tables = batch_tables(session)
+    row = session.execute(
+        "SELECT * FROM summary_metrics WHERE bucket = %s", [serving_state(session)["version"]]
+    ).one()
     expected = tables["summary_metrics"].iloc[0]
     assert (row["users"], row["movies"], row["views"], row["ratings"]) == tuple(
         int(expected[column]) for column in ("users", "movies", "views", "ratings")

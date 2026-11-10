@@ -15,26 +15,31 @@ if TYPE_CHECKING:
 
 KEYSPACE = os.getenv("CASSANDRA_KEYSPACE", "movie_analytics")
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "sql" / "cassandra_schema.cql"
-BATCH_BUCKET = "all"
+SERVING_STATE_ID = "batch"
 
 # CQL bind markers cannot represent identifiers. Keep queries static so that
 # callers cannot inject CQL through a table name.
 COUNT_QUERIES = {
-    "movie_performance": "SELECT COUNT(*) AS n FROM movie_performance",
-    "movies_by_genre_rating": "SELECT COUNT(*) AS n FROM movies_by_genre_rating",
-    "top_rated_movies": "SELECT COUNT(*) AS n FROM top_rated_movies",
-    "top_viewed_movies": "SELECT COUNT(*) AS n FROM top_viewed_movies",
-    "low_engagement_movies": "SELECT COUNT(*) AS n FROM low_engagement_movies",
-    "genre_popularity": "SELECT COUNT(*) AS n FROM genre_popularity",
-    "subscription_views": "SELECT COUNT(*) AS n FROM subscription_views",
-    "user_engagement": "SELECT COUNT(*) AS n FROM user_engagement",
-    "hourly_views": "SELECT COUNT(*) AS n FROM hourly_views",
-    "user_segments": "SELECT COUNT(*) AS n FROM user_segments",
-    "user_preferences": "SELECT COUNT(*) AS n FROM user_preferences",
-    "daily_views": "SELECT COUNT(*) AS n FROM daily_views",
-    "summary_metrics": "SELECT COUNT(*) AS n FROM summary_metrics",
-    "live_trending": "SELECT COUNT(*) AS n FROM live_trending",
-    "live_trending_spark": "SELECT COUNT(*) AS n FROM live_trending_spark",
+    name: f"SELECT COUNT(*) AS n FROM {name}"
+    for name in (
+        "genre_popularity", "genre_monthly", "subscription_views", "user_engagement", "hourly_views",
+        "user_segments", "user_preferences", "rating_distribution",
+        "live_trending", "live_trending_spark", "live_user_engagement", "live_user_engagement_spark",
+        "live_movie_engagement", "live_movie_engagement_spark",
+    )
+}
+# Versioned tables: count only the published version.
+COUNT_QUERIES.update({
+    name: f"SELECT COUNT(*) AS n FROM {name} WHERE bucket = %s"
+    for name in ("top_rated_movies", "top_viewed_movies", "low_engagement_movies", "daily_views", "summary_metrics")
+})
+COUNT_QUERIES.update({
+    name: f"SELECT COUNT(*) AS n FROM {name} WHERE bucket = %s ALLOW FILTERING"
+    for name in ("user_recommendations", "view_trends")
+})
+GENRE_COUNT_QUERIES = {
+    name: f"SELECT COUNT(*) AS n FROM {name} WHERE genre = %s AND bucket = %s"
+    for name in ("movie_performance", "movies_by_genre_rating")
 }
 
 
@@ -97,11 +102,46 @@ def query_frame(session: Session, cql: str, params: Sequence[Any] | None = None)
     return pd.DataFrame(list(session.execute(cql, params or [])))
 
 
-def table_counts(session: Session, tables: Sequence[str]) -> dict[str, int]:
-    unknown = set(tables) - COUNT_QUERIES.keys()
+def serving_state(session: Session) -> dict | None:
+    """The published batch version and the batch/speed boundary, or None before the first batch run."""
+    return session.execute("SELECT * FROM serving_state WHERE id = %s", [SERVING_STATE_ID]).one()
+
+
+def publish_serving_state(
+    session: Session, version: str, replay_day: Any = None, batch_cutoff: Any = None
+) -> str | None:
+    """Switch readers to `version`; returns the version that is no longer referenced (to delete)."""
+    from datetime import datetime, timezone
+
+    current = serving_state(session)
+    session.execute(
+        "INSERT INTO serving_state (id, version, previous_version, replay_day, batch_cutoff, published_at) "
+        "VALUES (%s, %s, %s, %s, %s, %s)",
+        [SERVING_STATE_ID, version, current["version"] if current else None, replay_day, batch_cutoff,
+         datetime.now(timezone.utc)],
+    )
+    return current["previous_version"] if current else None
+
+
+def table_counts(session: Session, tables: Sequence[str], version: str | None = None) -> dict[str, int]:
+    """Row counts; versioned tables count only `version` (default: the published one)."""
+    unknown = set(tables) - COUNT_QUERIES.keys() - GENRE_COUNT_QUERIES.keys()
     if unknown:
         raise ValueError(f"Unknown Cassandra tables: {sorted(unknown)}")
-    return {table: session.execute(COUNT_QUERIES[table]).one()["n"] for table in tables}
+    if version is None:
+        state = serving_state(session)
+        version = state["version"] if state else None
+    counts = {}
+    for table in tables:
+        if table in GENRE_COUNT_QUERIES:
+            genres = [row["genre"] for row in session.execute("SELECT genre FROM genre_popularity")]
+            counts[table] = sum(
+                session.execute(GENRE_COUNT_QUERIES[table], [genre, version]).one()["n"] for genre in genres
+            )
+        else:
+            query = COUNT_QUERIES[table]
+            counts[table] = session.execute(query, [version] if "%s" in query else []).one()["n"]
+    return counts
 
 
 def main() -> None:
