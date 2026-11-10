@@ -30,55 +30,67 @@ class DashboardQuery:
     params: tuple[Any, ...] = ()
 
 
+VERSION = object()  # placeholder for the published batch version (bound at run time)
+
 DASHBOARD_QUERIES: tuple[DashboardQuery, ...] = (
     DashboardQuery(
         "genre_catalog", "BR1", "range",
-        "SELECT movie_id, title, genre, release_year, duration, views, avg_rating, completion_rate "
-        "FROM movie_performance WHERE genre = %s",
-        f"SELECT movie_id, title, genre, release_year, duration, views, avg_rating, completion_rate "
-        f"FROM analytics.movie_performance WHERE genre = '{GENRE}' ORDER BY views DESC, movie_id",
-        (GENRE,),
+        "SELECT movie_id, title, genre, release_year, duration, content_type, language, maturity_rating, "
+        "views, avg_rating, completion_rate FROM movie_performance WHERE genre = %s AND bucket = %s",
+        f"SELECT movie_id, title, genre, release_year, duration, content_type, language, maturity_rating, "
+        f"views, avg_rating, completion_rate FROM analytics.movie_performance WHERE genre = '{GENRE}' "
+        f"ORDER BY views DESC, movie_id",
+        (GENRE, VERSION),
     ),
     DashboardQuery(
         "top_viewed", "BR2", "range",
-        "SELECT title, genre, views, avg_rating FROM top_viewed_movies WHERE bucket = 'all' LIMIT 10",
+        "SELECT title, genre, views, avg_rating FROM top_viewed_movies WHERE bucket = %s LIMIT 10",
         "SELECT title, genre, views, avg_rating FROM analytics.movie_performance "
         "ORDER BY views DESC, movie_id LIMIT 10",
+        (VERSION,),
     ),
     DashboardQuery(
-        "user_favorite_genres", "BR3", "point",
-        "SELECT favorite_genres FROM user_preferences WHERE user_id = %s",
-        f"SELECT favorite_genres FROM analytics.user_preferences WHERE user_id = '{USER}'",
+        "user_recommendations", "BR3", "point",
+        "SELECT rank, movie_id, title, genre, weighted_rating, rating_count FROM user_recommendations "
+        "WHERE user_id = %s",
+        f"SELECT rank, movie_id, title, genre, weighted_rating, rating_count FROM analytics.user_recommendations "
+        f"WHERE user_id = '{USER}' ORDER BY rank",
         (USER,),
-    ),
-    DashboardQuery(
-        "genre_top_rated", "BR3", "range",
-        "SELECT title, genre, weighted_rating, avg_rating, rating_count, views "
-        "FROM movies_by_genre_rating WHERE genre = %s LIMIT 8",
-        f"SELECT title, genre, weighted_rating, avg_rating, rating_count, views "
-        f"FROM analytics.movie_performance WHERE genre = '{GENRE}' AND weighted_rating IS NOT NULL "
-        f"ORDER BY weighted_rating DESC, movie_id LIMIT 8",
-        (GENRE,),
     ),
     DashboardQuery(
         "top_rated", "BR4", "range",
         "SELECT title, genre, weighted_rating, avg_rating, rating_count "
-        "FROM top_rated_movies WHERE bucket = 'all' LIMIT 10",
+        "FROM top_rated_movies WHERE bucket = %s LIMIT 10",
         "SELECT title, genre, weighted_rating, avg_rating, rating_count FROM analytics.movie_performance "
         "WHERE weighted_rating IS NOT NULL ORDER BY weighted_rating DESC, rating_count DESC, movie_id LIMIT 10",
+        (VERSION,),
+    ),
+    DashboardQuery(
+        "rating_distribution", "BR4", "point",
+        "SELECT movie_id, rating_count, avg_rating, r1, r2, r3, r4, r5 FROM rating_distribution WHERE movie_id = %s",
+        "SELECT movie_id, rating_count, avg_rating, r1, r2, r3, r4, r5 FROM analytics.rating_distribution "
+        "WHERE movie_id = 'M00001'",
+        ("M00001",),
     ),
     DashboardQuery(
         "genre_popularity", "BR5", "range",
-        "SELECT genre, views, unique_viewers FROM genre_popularity",
-        "SELECT genre, views, unique_viewers FROM analytics.genre_popularity ORDER BY genre",
+        "SELECT genre, views, unique_viewers, watch_hours, avg_rating FROM genre_popularity",
+        "SELECT genre, views, unique_viewers, watch_hours, avg_rating FROM analytics.genre_popularity ORDER BY genre",
+    ),
+    DashboardQuery(
+        "genre_monthly", "BR5", "range",
+        "SELECT genre, month, views, unique_viewers, watch_hours, avg_rating FROM genre_monthly WHERE genre = %s",
+        f"SELECT genre, month, views, unique_viewers, watch_hours, avg_rating FROM analytics.genre_monthly "
+        f"WHERE genre = '{GENRE}' ORDER BY month",
+        (GENRE,),
     ),
     DashboardQuery(
         "top_share_performance", "BR7", "range",
         "SELECT title, genre, views, avg_rating, completion_rate, watch_hours "
-        "FROM top_viewed_movies WHERE bucket = 'all' LIMIT %s",
+        "FROM top_viewed_movies WHERE bucket = %s LIMIT %s",
         "SELECT title, genre, views, avg_rating, completion_rate, watch_hours "
         f"FROM analytics.movie_performance ORDER BY views DESC, movie_id LIMIT {TOP_SHARE_ROWS}",
-        (TOP_SHARE_ROWS,),
+        (VERSION, TOP_SHARE_ROWS),
     ),
     DashboardQuery(
         "user_views_scan", "BR6", "scan",
@@ -91,11 +103,12 @@ DASHBOARD_QUERIES: tuple[DashboardQuery, ...] = (
         "SELECT hour, views FROM analytics.hourly_views ORDER BY hour",
     ),
     DashboardQuery(
-        "low_engagement", "BR8", "range",
-        "SELECT movie_id, title, genre, views, completion_rate FROM low_engagement_movies "
-        "WHERE bucket = 'all' LIMIT 10",
-        "SELECT movie_id, title, genre, views, completion_rate FROM analytics.low_engagement_movies "
-        "ORDER BY views ASC, title ASC, movie_id ASC LIMIT 10",
+        "low_engagement", "BR8", "scan",
+        "SELECT movie_id, title, genre, views, completion_sum, completion_rate, is_low_engagement "
+        "FROM low_engagement_movies WHERE bucket = %s",
+        "SELECT movie_id, title, genre, views, completion_sum, completion_rate, is_low_engagement "
+        "FROM analytics.low_engagement_movies ORDER BY movie_id",
+        (VERSION,),
     ),
     DashboardQuery(
         "user_segments", "BR9", "range",
@@ -104,8 +117,17 @@ DASHBOARD_QUERIES: tuple[DashboardQuery, ...] = (
     ),
     DashboardQuery(
         "daily_views", "BR10", "range",
-        "SELECT day, views, unique_viewers FROM daily_views WHERE bucket = 'all'",
+        "SELECT day, views, unique_viewers FROM daily_views WHERE bucket = %s",
         "SELECT day, views, unique_viewers FROM analytics.daily_views ORDER BY day",
+        (VERSION,),
+    ),
+    DashboardQuery(
+        "genre_weekly_trend", "BR10", "range",
+        "SELECT period_start, views, prev_views, growth FROM view_trends "
+        "WHERE scope = 'genre' AND key = %s AND period = 'week'",
+        f"SELECT period_start, views, prev_views, growth FROM analytics.view_trends "
+        f"WHERE scope = 'genre' AND key = '{GENRE}' AND period = 'week' ORDER BY period_start",
+        (GENRE,),
     ),
 )
 
@@ -119,9 +141,11 @@ ADHOC_SQL = (
 
 
 def run_cql(session: "Session", query: DashboardQuery) -> "pd.DataFrame":
-    from src.cassandra_store import query_frame
+    from src.cassandra_store import query_frame, serving_state
 
-    return query_frame(session, query.cql, list(query.params))
+    version = serving_state(session)["version"] if VERSION in query.params else None
+    params = [version if param is VERSION else param for param in query.params]
+    return query_frame(session, query.cql, params)
 
 
 def run_sql(spark: "SparkSession", query: DashboardQuery) -> "pd.DataFrame":

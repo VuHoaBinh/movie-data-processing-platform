@@ -10,8 +10,9 @@ from src import batch_processing, data_quality, spark_batch_job
 Tables = dict[str, pd.DataFrame]
 
 
-def pandas_tables(raw_dir: Path, now: datetime | None = None) -> tuple[Tables, data_quality.Report]:
-    curated, report = batch_processing.curate(*batch_processing.read_raw(raw_dir), now=now)
+def pandas_tables(raw_dir: Path, now: datetime | None = None, **live) -> tuple[Tables, data_quality.Report]:
+    """`live`: replay_day / batch_cutoff / archive_dir, see batch_processing.read_raw."""
+    curated, report = batch_processing.curate(*batch_processing.read_raw(raw_dir, **live), now=now)
     return batch_processing.build_tables(*curated), report
 
 

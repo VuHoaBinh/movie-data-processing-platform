@@ -35,7 +35,9 @@ services:
     command:
       - >-
         set -e; /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --create --if-not-exists --topic watch-events --partitions 1 --replication-factor 1;
-        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --create --if-not-exists --topic trending-results --partitions 1 --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --create --if-not-exists --topic trending-results --partitions 1 --replication-factor 1;
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --create --if-not-exists --topic live-user-engagement --partitions 1 --replication-factor 1 --config cleanup.policy=compact;
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --create --if-not-exists --topic live-movie-engagement --partitions 1 --replication-factor 1 --config cleanup.policy=compact
     depends_on:
       kafka:
         condition: service_healthy
@@ -74,6 +76,8 @@ services:
     command: jobmanager
     ports:
       - "8081:8081"
+    volumes:
+      - ./data:/opt/flink/data  # raw CSVs + warehouse for the Flink batch job
     environment:
       FLINK_PROPERTIES: |-
         jobmanager.rpc.address: flink-jobmanager
@@ -94,6 +98,8 @@ services:
       context: .
       dockerfile: flink/Dockerfile
     command: taskmanager
+    volumes:
+      - ./data:/opt/flink/data
     environment:
       FLINK_PROPERTIES: |-
         jobmanager.rpc.address: flink-jobmanager
@@ -104,7 +110,8 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  flink-trending-job:
+  # Flink speed layer (alternative engine): BR2 trending, BR6/BR8 per-day running totals.
+  flink-speed-job:
     build:
       context: .
       dockerfile: flink/Dockerfile
@@ -113,7 +120,7 @@ services:
       - -lc
       - >-
         until curl -fsS http://flink-jobmanager:8081/overview >/dev/null; do sleep 2; done;
-        flink run -m flink-jobmanager:8081 -py /opt/flink/usrlib/flink_trending_sql_job.py
+        flink run -m flink-jobmanager:8081 -py /opt/flink/usrlib/flink_speed_sql_job.py
     environment:
       FLINK_PROPERTIES: |-
         jobmanager.rpc.address: flink-jobmanager
@@ -121,7 +128,10 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       KAFKA_WATCH_TOPIC: watch-events
       KAFKA_TREND_TOPIC: trending-results
+      KAFKA_USER_ENGAGEMENT_TOPIC: live-user-engagement
+      KAFKA_MOVIE_ENGAGEMENT_TOPIC: live-movie-engagement
       TREND_WINDOW_SECONDS: ${TREND_WINDOW_SECONDS:-300}
+      WATERMARK_SECONDS: ${WATERMARK_SECONDS:-60}
     depends_on:
       flink-jobmanager:
         condition: service_healthy
@@ -129,37 +139,63 @@ services:
         condition: service_completed_successfully
     restart: on-failure
 
+  # Flink batch layer (alternative engine), on demand: `docker compose --profile flink-batch run --rm flink-batch`.
+  # Recomputes the analytics tables from the same raw files and boundary as the last Spark batch run;
+  # compare with `docker compose run --rm --no-deps benchmark python -m src.compare_batch_engines`.
+  flink-batch:
+    profiles: ["flink-batch"]
+    build:
+      context: .
+      dockerfile: flink/Dockerfile
+    command:
+      - bash
+      - -lc
+      - >-
+        until curl -fsS http://flink-jobmanager:8081/overview >/dev/null; do sleep 2; done;
+        flink run -m flink-jobmanager:8081 -py /opt/flink/usrlib/flink_batch_sql_job.py --data-dir /opt/flink/data
+    volumes:
+      - ./data:/opt/flink/data
+    environment:
+      FLINK_PROPERTIES: |-
+        jobmanager.rpc.address: flink-jobmanager
+        python.client.executable: /usr/bin/python3
+    depends_on:
+      flink-jobmanager:
+        condition: service_healthy
+
+  # Replays the last day of watch_history in watch_timestamp order (REPLAY_SPEED x real time) and keeps
+  # sending heartbeats on the simulated clock. The clock lives in Cassandra, so a restart resumes.
   event-producer:
     build:
       context: .
       dockerfile: Dockerfile.stream
-    command:
-      [
-        "python",
-        "src/kafka_event_producer.py",
-        "--limit",
-        "100000",
-        "--rate",
-        "500",
-      ]
+    command: ["python", "-m", "src.kafka_event_producer"]
     volumes:
       - ./data:/app/data:ro
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       KAFKA_WATCH_TOPIC: watch-events
+      CASSANDRA_HOST: cassandra
+      REPLAY_SPEED: ${REPLAY_SPEED:-60}
+      REPLAY_DAY: ${REPLAY_DAY:-auto}
     depends_on:
       kafka-init:
         condition: service_completed_successfully
-    restart: unless-stopped
+      cassandra-init:
+        condition: service_completed_successfully
+    restart: on-failure
 
-  trending-materializer:
+  # Flink results (Kafka) -> Cassandra live_trending / live_user_engagement / live_movie_engagement.
+  speed-materializer:
     build:
       context: .
       dockerfile: Dockerfile.stream
-    command: ["python", "-m", "src.trending_materializer"]
+    command: ["python", "-m", "src.speed_materializer"]
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       KAFKA_TREND_TOPIC: trending-results
+      KAFKA_USER_ENGAGEMENT_TOPIC: live-user-engagement
+      KAFKA_MOVIE_ENGAGEMENT_TOPIC: live-movie-engagement
       CASSANDRA_HOST: cassandra
     depends_on:
       kafka-init:
@@ -168,28 +204,44 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
-  # Alternative stream engine (`docker compose --profile alt up spark-streaming`): same 5-minute
-  # top-10 as Flink, written to Cassandra table live_trending_spark for comparison.
+  # Spark speed layer (main engine): BR2, BR6, BR8 -> Cassandra *_spark tables.
   spark-streaming:
-    profiles: ["alt"]
     build:
       context: .
       dockerfile: Dockerfile
     image: movie-analytics-app:latest
-    command: ["python", "-m", "src.spark_streaming_trending"]
+    command: ["python", "-m", "src.spark_speed_layer"]
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       KAFKA_WATCH_TOPIC: watch-events
       CASSANDRA_HOST: cassandra
       TREND_WINDOW_SECONDS: ${TREND_WINDOW_SECONDS:-300}
-      TRENDING_TABLE: live_trending_spark
-      CHECKPOINT_DIR: /checkpoints/trending
+      WATERMARK_SECONDS: ${WATERMARK_SECONDS:-60}
+      TRIGGER_SECONDS: ${TRIGGER_SECONDS:-5}
+      CHECKPOINT_DIR: /checkpoints/speed
     volumes:
       - spark-checkpoint:/checkpoints  # offsets and window state survive container restarts
     depends_on:
       kafka-init:
         condition: service_completed_successfully
       cassandra-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # Kafka watch-events -> raw zone (headerless CSV in data/warehouse/landing), read by the next batch run.
+  stream-archiver:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: movie-analytics-app:latest
+    command: ["python", "-m", "src.stream_archiver"]
+    volumes:
+      - ./data:/app/data
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_WATCH_TOPIC: watch-events
+    depends_on:
+      kafka-init:
         condition: service_completed_successfully
     restart: unless-stopped
 
@@ -224,6 +276,7 @@ services:
       - ./data:/app/data
     environment:
       CASSANDRA_HOST: cassandra
+      REPLAY_DAY: ${REPLAY_DAY:-auto}
     depends_on:
       cassandra-init:
         condition: service_completed_successfully
@@ -244,9 +297,9 @@ services:
     depends_on:
       spark-batch:
         condition: service_completed_successfully
-      flink-trending-job:
+      flink-speed-job:
         condition: service_started
-      trending-materializer:
+      speed-materializer:
         condition: service_started
     restart: unless-stopped
 
