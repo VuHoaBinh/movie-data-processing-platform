@@ -7,6 +7,11 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+# Batch serving keyspaces; live tables use the Spark keyspace.
+SPARK_KEYSPACE = os.getenv("CASSANDRA_KEYSPACE", "movie_analytics")
+FLINK_KEYSPACE = os.getenv("FLINK_CASSANDRA_KEYSPACE", "movie_analytics_flink")
+BATCH_KEYSPACES = {"Spark": SPARK_KEYSPACE, "Flink": FLINK_KEYSPACE}
+
 # BR8: a movie is low-engagement when views >= MIN_VIEWS and avg completion < LOW_COMPLETION_THRESHOLD.
 # With ~50 views per movie on average over the history, 20 views keeps the flag away from noise.
 MIN_VIEWS = int(os.getenv("BR8_MIN_VIEWS", "20"))
