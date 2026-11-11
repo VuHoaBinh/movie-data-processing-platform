@@ -70,7 +70,7 @@ def main() -> None:
     table_env.execute_sql(f"""
         CREATE TABLE user_engagement_results (
             `day` STRING, user_id STRING, subscription_plan STRING,
-            views BIGINT, watch_minutes BIGINT, completion_sum DOUBLE, last_sent_at_ms BIGINT,
+            `views` BIGINT, watch_minutes BIGINT, completion_sum DOUBLE, last_sent_at_ms BIGINT,
             PRIMARY KEY (`day`, user_id) NOT ENFORCED
         ) WITH (
             'connector' = 'upsert-kafka', 'topic' = '{user_topic}',
@@ -79,7 +79,7 @@ def main() -> None:
     table_env.execute_sql(f"""
         CREATE TABLE movie_engagement_results (
             `day` STRING, movie_id STRING, title STRING, genre STRING,
-            views BIGINT, watch_minutes BIGINT, completion_sum DOUBLE, last_sent_at_ms BIGINT,
+            `views` BIGINT, watch_minutes BIGINT, completion_sum DOUBLE, last_sent_at_ms BIGINT,
             PRIMARY KEY (`day`, movie_id) NOT ENFORCED
         ) WITH (
             'connector' = 'upsert-kafka', 'topic' = '{movie_topic}',
