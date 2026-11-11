@@ -142,7 +142,10 @@ def _tag_table_spark(
 
     id_column = ID_COLUMN[table]
     required = REQUIRED[table] or [c for c in frame.columns if not c.startswith("_")]
-    order = Window.partitionBy(id_column).orderBy(F.monotonically_increasing_id())
+    # Keep the first row of a duplicated id: ingest order (`_src`: CSV before archive, `_seq`: row number
+    # given at ingest). The Flink batch job uses the same columns, so both branches keep the same row.
+    sequence = [c for c in ("_src", "_seq") if c in frame.columns] or [F.monotonically_increasing_id()]
+    order = Window.partitionBy(id_column).orderBy(*sequence)
     frame = frame.withColumn("_rn", F.row_number().over(order))
     # Orphan checks: flag columns come from left joins against the distinct valid ids.
     if users is not None and table in TIME_COLUMN:

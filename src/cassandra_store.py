@@ -83,9 +83,12 @@ def wait_for_cassandra(retries: int = 60, delay: float = 3.0) -> Session:
     raise CassandraUnavailable("unreachable")
 
 
-def apply_schema(session: Session, path: Path = SCHEMA_PATH) -> None:
-    """Run every statement of the CQL file (statements are separated by ';')."""
-    lines = [line for line in path.read_text(encoding="utf-8").splitlines() if not line.strip().startswith("--")]
+def apply_schema(session: Session, path: Path = SCHEMA_PATH, keyspace: str = "movie_analytics") -> None:
+    """Run every statement of the CQL file (statements are separated by ';') into `keyspace`."""
+    import re
+
+    text = re.sub(r"\bmovie_analytics\b", keyspace, path.read_text(encoding="utf-8"))
+    lines = [line for line in text.splitlines() if not line.strip().startswith("--")]
     for statement in "\n".join(lines).split(";"):
         statement = statement.strip()
         if not statement:
@@ -123,6 +126,23 @@ def publish_serving_state(
     return current["previous_version"] if current else None
 
 
+def publish_batch_version(
+    session: Session, version: str, genres: Sequence[str], replay_day: Any = None, batch_cutoff: Any = None
+) -> None:
+    """Point the dashboard at `version` (in the session's keyspace), then drop the partitions of the
+    version before the previous one (the previous one stays for readers that loaded it a moment ago)."""
+    from src.serving_spec import GENRE_VERSIONED_TABLES, VERSIONED_TABLES
+
+    stale = publish_serving_state(session, version, replay_day, batch_cutoff)
+    if stale:
+        for table in VERSIONED_TABLES:
+            session.execute(f"DELETE FROM {table} WHERE bucket = %s", [stale])
+        for table in GENRE_VERSIONED_TABLES:
+            for genre in genres:
+                session.execute(f"DELETE FROM {table} WHERE genre = %s AND bucket = %s", [genre, stale])
+    print(f"Serving version {version} published in {session.keyspace}" + (f"; removed {stale}" if stale else ""))
+
+
 def table_counts(session: Session, tables: Sequence[str], version: str | None = None) -> dict[str, int]:
     """Row counts; versioned tables count only `version` (default: the published one)."""
     unknown = set(tables) - COUNT_QUERIES.keys() - GENRE_COUNT_QUERIES.keys()
@@ -148,9 +168,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Cassandra schema helper.")
     parser.add_argument("command", choices=["init"], help="init: wait for Cassandra and apply the schema")
     parser.parse_args()
+    from src import settings
+
     session = wait_for_cassandra()
-    apply_schema(session)
-    print(f"Schema applied to keyspace {KEYSPACE}")
+    for keyspace in (settings.SPARK_KEYSPACE, settings.FLINK_KEYSPACE):
+        apply_schema(session, keyspace=keyspace)
+        print(f"Schema applied to keyspace {keyspace}")
 
 
 if __name__ == "__main__":

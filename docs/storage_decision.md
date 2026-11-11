@@ -54,6 +54,8 @@ cho các ngày `>= batch_cutoff` (gộp batch + speed theo kiến trúc Lambda).
 ### Ánh xạ BR → bảng → truy vấn
 
 `v` = phiên bản batch đang công bố (`serving_state.version`); `d` = một ngày của speed layer.
+Các bảng batch tồn tại ở hai keyspace cùng schema: `movie_analytics` (nhánh Spark) và `movie_analytics_flink`
+(nhánh Flink, nạp bằng `src/load_serving.py`); bảng live của cả hai engine nằm trong `movie_analytics`.
 
 | BR | Bảng Cassandra (khoá chính) | Truy vấn dashboard |
 |---|---|---|

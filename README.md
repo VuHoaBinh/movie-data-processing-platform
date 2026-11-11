@@ -6,19 +6,23 @@ low-engagement detection, user segmentation, and time-based trends.
 
 ## Architecture
 
-Lambda architecture:
+Lambda architecture with two parallel branches: **Spark** (main solution) and **Flink** (alternative,
+for comparison). Same sources, same lake layers, same serving tables and the same app; only the engine differs.
 
 ```text
-watch_history.csv (days before the replay day) ---------------------------+
-                                                                          v
-                         raw zone archive (CSV) ------> Spark batch --> Hive (raw -> curated -> analytics)
-                                  ^                                       |
-                                  | stream-archiver                       v
-last day of watch_history --> Kafka watch-events --+--> Spark Structured Streaming --> Cassandra *_spark --+
-  (producer, x60 replay)          ^                |                                                       |
-  dashboard form -----------------+                +--> Flink SQL --> Kafka --> materializer --> Cassandra -+--> Streamlit
-                                                                                                          |   (batch + live
-                                                          Cassandra batch serving tables -----------------+    merged)
+                         4 CSV files + Kafka archive (stream-archiver, CSV in data/warehouse/landing/)
+                                              |
+                                  shared INGEST (Spark): raw.* Parquet, rows numbered `_seq`
+                                  + data/warehouse/batch_boundary.json (replay day, batch cutoff)
+                                  /                                         \
+     Spark batch: curated.* -> analytics.* (Hive)          Flink SQL BATCH: flink_curated -> flink_analytics (Parquet)
+                  | Spark Cassandra connector                               | src/load_serving.py
+     Cassandra keyspace movie_analytics                    Cassandra keyspace movie_analytics_flink
+                                  \                                         /
+replay day --> Kafka watch-events --+--> Spark Structured Streaming --> live_*_spark (movie_analytics)
+dashboard form --^                  +--> Flink SQL STREAMING --> Kafka --> materializer --> live_* (movie_analytics)
+                                                                                |
+                         Streamlit: engine switch = batch keyspace + live tables of that engine (BR1-BR10)
 ```
 
 * **Live day.** The last day of `watch_history` (`REPLAY_DAY`, default `auto`) belongs to the speed
@@ -28,7 +32,7 @@ last day of watch_history --> Kafka watch-events --+--> Spark Structured Streami
   watermark (1 minute) moving.
 * **No double counting.** The batch reads the CSV *without* the replay day, plus the archived Kafka
   events of closed days (`stream-archiver`, headerless CSV in `data/warehouse/landing/`, de-duplicated by
-  `watch_id`). It records `batch_cutoff` in `summary_metrics`; the dashboard adds the speed tables only
+  `watch_id`). It records `batch_cutoff` in `serving_state`; the dashboard adds the speed tables only
   for days >= `batch_cutoff`.
 * **Speed layer (BR2, BR6, BR8)**, same logic in both engines: BR2 = 5-minute tumbling window, top 10;
   BR6 = per (day, user) views / watch minutes / completion sum; BR8 = per (day, movie). Completion of a
@@ -44,9 +48,9 @@ Data management (see [docs/storage_decision.md](docs/storage_decision.md) for th
   (UTC timestamps, de-duplicated; `curated.watch_events` partitioned by `watch_date`) and
   `analytics.*` (the 14 analytics tables).
 
-One Spark run reads the CSVs, builds the lake zones, computes the dashboard tables and loads them into
-Cassandra. The Pandas pipeline (`src/batch_processing.py`) is a lightweight twin that writes the same
-tables as CSV.
+One `spark-batch` run does the shared ingest (CSV + archive -> `raw.*`), then the Spark branch
+(curated, analytics, Cassandra). The Flink branch then reads the same raw zone. The Pandas pipeline
+(`src/batch_processing.py`) is a lightweight reference twin used by the tests.
 
 ## Business requirement coverage
 
@@ -69,17 +73,17 @@ The batch tables are produced by one Spark run (Pandas twin for tests), not ten 
 switches `serving_state` to it, so the dashboard never reads a half-written table; the version before
 the previous one is deleted.
 
-**Flink batch (alternative engine).** `flink/flink_batch_sql_job.py` recomputes the same analytics tables
-with Flink SQL in BATCH mode from the same raw files and boundary (`data/warehouse/batch_boundary.json`,
-written by Spark). Run it after a Spark batch and compare:
+**Flink batch branch (alternative engine).** `flink/flink_batch_sql_job.py` (Flink SQL, BATCH mode) reads
+the shared raw zone and boundary, applies the same data-quality rules (a duplicated id keeps its first row
+by `_src`, `_seq`, like Spark) and writes `flink_curated` / `flink_analytics` (Parquet) under
+`data/warehouse/flink-warehouse/`. `src/load_serving.py` loads them into the keyspace
+`movie_analytics_flink` with the same tables (`src/serving_spec.py`) and versioning. Run it after a Spark
+batch (which refreshes the raw zone), then compare the two branches:
 
 ```powershell
-docker compose --profile flink-batch run --rm flink-batch
+docker compose --profile flink-batch run --rm flink-load
 docker compose run --rm --no-deps benchmark python -m src.compare_batch_engines
 ```
-
-Known difference: for a duplicated id Spark keeps the first row in file order, Flink (no row order in a
-file source) the first by value; both agree when duplicates are identical copies.
 
 ## Run the full stack with Docker (recommended)
 
@@ -102,7 +106,8 @@ dashboard at `http://localhost:8501`, the Flink UI at `http://localhost:8081`; C
 * The "Record a movie view" form sends one watch event to Kafka at the simulated time. BR6/BR8 live
   totals change within seconds, BR2 when the window closes. The archiver stores it in the raw zone;
   "Refresh batch (Spark)" (or the next daily run) moves closed days from the speed layer into the batch.
-* The sidebar switch selects the speed-layer engine (Spark or Flink) for BR2, BR6 and BR8.
+* The sidebar switch selects the engine for all ten BRs: the batch tables come from that branch's keyspace
+  and BR2/BR6/BR8 live data from that engine's live tables. Load the Flink branch first (see above).
 * **After a schema change** (`sql/cassandra_schema.cql`) recreate the serving layer: `docker compose down -v`.
   Cassandra only holds derived data; `data/warehouse/landing/` keeps the archived live events.
 * Stop with `Ctrl+C`, then `docker compose down` (add `-v` to also drop the Cassandra volume).
@@ -159,6 +164,8 @@ src/stream_processing.py     Offline stream replay utility
 flink/flink_speed_sql_job.py Flink SQL speed layer (BR2, BR6, BR8)
 flink/flink_batch_sql_job.py Flink SQL batch layer (alternative engine, same tables as Spark)
 src/compare_batch_engines.py Spark vs Flink batch output comparison
+src/load_serving.py          Flink batch output -> Cassandra keyspace movie_analytics_flink
+src/serving_spec.py          Analytics -> serving table mapping shared by both branches
 benchmarks/                  Performance measurement scripts (see benchmarks/README.md)
 app.py                       Streamlit presentation layer (reads Cassandra)
 data_dictionary.md           Raw data definitions

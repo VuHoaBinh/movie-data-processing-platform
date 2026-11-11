@@ -31,14 +31,20 @@ ENGINE_SUFFIX = {"Spark": "_spark", "Flink": ""}  # each engine writes its own l
 
 
 @st.cache_resource
-def get_session():
-    return connect()
+def get_session(keyspace: str = settings.SPARK_KEYSPACE):
+    """One session per keyspace: movie_analytics (Spark batch, live tables, replay clock) and
+    movie_analytics_flink (Flink batch)."""
+    return connect(keyspace=keyspace)
 
 
 @st.cache_data(ttl=60, show_spinner=False)
+def _cql(statement: str, params: tuple, keyspace: str) -> pd.DataFrame:
+    return query_frame(get_session(keyspace), statement, list(params))
+
+
 def cql(statement: str, params: tuple = ()) -> pd.DataFrame:
-    """Run one read-only CQL query against the serving layer (cached for a minute)."""
-    return query_frame(get_session(), statement, list(params))
+    """Read-only CQL on the batch tables of the selected engine (cached for a minute)."""
+    return _cql(statement, params, BATCH_KEYSPACE)
 
 
 try:
@@ -48,10 +54,20 @@ except CassandraUnavailable as error:
     st.caption("Start it with `docker compose up -d cassandra cassandra-init`, then run the Spark batch job.")
     st.stop()
 
-state = serving_state(get_session())
+page = st.sidebar.radio("Workspace", ["Viewer", "Analyst", "Manager"])
+engine = st.sidebar.radio(
+    "Engine (batch + speed, BR1-BR10)", ["Spark", "Flink"], horizontal=True,
+    help="Spark = main solution, Flink = alternative. Both serve the same tables from their own pipeline.",
+)
+BATCH_KEYSPACE = settings.BATCH_KEYSPACES[engine]
+
+state = serving_state(get_session(BATCH_KEYSPACE))
 if state is None:
-    st.error("No batch version is published yet. Run the Spark batch job to load Cassandra.")
-    st.code("python -m src.spark_batch_job --cassandra-host localhost")
+    st.error(f"No {engine} batch version is published yet in keyspace {BATCH_KEYSPACE}.")
+    if engine == "Spark":
+        st.code("python -m src.spark_batch_job --cassandra-host localhost")
+    else:
+        st.code("docker compose --profile flink-batch run --rm flink-load")
     st.stop()
 # Every batch-table read uses the published version, so a running batch never shows half-written data.
 VERSION = state["version"]
@@ -326,10 +342,15 @@ def batch_rows(statement: str, params: tuple = ()) -> pd.DataFrame:
 
 
 st.title("Movie Streaming Analytics Platform")
-page = st.sidebar.radio("Workspace", ["Viewer", "Analyst", "Manager"])
-engine = st.sidebar.radio("Speed-layer engine (BR2, BR6, BR8)", ["Spark", "Flink"], horizontal=True)
-if st.sidebar.button("Refresh batch (Spark)"):
-    start_batch()
+st.sidebar.caption(f"Batch tables: keyspace {BATCH_KEYSPACE}, version {VERSION}")
+if engine == "Spark":
+    if st.sidebar.button("Refresh batch (Spark)"):
+        start_batch()
+else:
+    st.sidebar.caption(
+        "Refresh the Flink batch after a Spark run (it reuses the shared raw zone): "
+        "`docker compose --profile flink-batch run --rm flink-load`"
+    )
 with st.sidebar:
     render_batch_status()
     render_replay_status()

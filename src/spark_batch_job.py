@@ -14,6 +14,7 @@ from pyspark.sql.types import DateType, DoubleType, IntegerType, StringType, Str
 from src import settings
 from src.data_quality import clean_spark, format_report, report_from_rows, utc_now
 from src.replay_clock import batch_cutoff as compute_batch_cutoff
+from src.serving_spec import SERVING_TABLES, serving_columns
 
 CASSANDRA_PACKAGE = "com.datastax.spark:spark-cassandra-connector_2.12:3.5.1"
 RAW_FILES = ("users.csv", "movies.csv", "ratings.csv", "watch_history.csv")
@@ -76,14 +77,18 @@ def create_spark(
 
 
 def read_raw(spark: SparkSession, raw_dir: Path) -> tuple[DataFrame, ...]:
-    """Read the raw CSVs with explicit schemas (raw zone: nothing is dropped or parsed yet)."""
+    """Read the raw CSVs with explicit schemas (raw zone: nothing is dropped or parsed yet).
+
+    `_seq` numbers the rows in file order at ingest (increasing, not consecutive). It is stored in the raw
+    zone so that every engine keeps the same row of a duplicated id.
+    """
     missing = [name for name in RAW_FILES if not (raw_dir / name).is_file()]
     if missing:
         raise FileNotFoundError(f"Missing raw files in {raw_dir}: {', '.join(missing)}")
     return tuple(
         spark.read.option("header", True).option("nullValue", "").schema(
             RAW_SCHEMAS[Path(name).stem]
-        ).csv(str(raw_dir / name))
+        ).csv(str(raw_dir / name)).withColumn("_seq", F.monotonically_increasing_id())
         for name in RAW_FILES
     )
 
@@ -95,7 +100,10 @@ def read_archive(spark: SparkSession, archive_dir: Path | None) -> DataFrame | N
         return None
     schema = RAW_SCHEMAS["watch_history"]
     archived = spark.read.schema(schema).option("header", False).option("nullValue", "").csv(str(archive_dir))
-    return archived.select(*[field.name for field in schema.fields])  # drop the watch_date partition column
+    # Drop the watch_date partition column; number the rows like `read_raw`.
+    return archived.select(*[field.name for field in schema.fields]).withColumn(
+        "_seq", F.monotonically_increasing_id()
+    )
 
 
 def _event_day(column: str = "watch_timestamp"):
@@ -106,7 +114,9 @@ def select_watch_events(
     watches: DataFrame, archived: DataFrame | None, replay_day: date | None, batch_cutoff: date | None
 ) -> DataFrame:
     """Spark twin of `batch_processing.select_watch_events`: CSV history without the replay day plus
-    archived live events of closed days (re-sent events share a watch_id and are de-duplicated)."""
+    archived live events of closed days (re-sent events share a watch_id and are de-duplicated).
+    `_src` (0 = CSV, 1 = archive) orders the CSV row first when an id is in both."""
+    watches = watches.withColumn("_src", F.lit(0))
     if replay_day is not None:
         day = _event_day()
         watches = watches.where(day.isNull() | (day != F.lit(replay_day)))
@@ -114,7 +124,7 @@ def select_watch_events(
         cutoff = batch_cutoff or replay_day
         if cutoff is not None:
             archived = archived.where(_event_day() < F.lit(cutoff))
-        watches = watches.unionByName(archived)
+        watches = watches.unionByName(archived.withColumn("_src", F.lit(1)))
     return watches
 
 
@@ -153,8 +163,10 @@ def simulated_day(cassandra_host: str | None, archive_lag_seconds: float = 30.0)
     return clock.sim_now(datetime.now(timezone.utc) - timedelta(seconds=archive_lag_seconds)).date()
 
 
-def write_boundary(warehouse_dir: Path, replay_day: date | None, batch_cutoff: date | None, now: datetime) -> None:
-    """Record which input this run used, so the Flink batch job can recompute on exactly the same rows."""
+def write_boundary(
+    warehouse_dir: Path, replay_day: date | None, batch_cutoff: date | None, now: datetime, has_archive: bool
+) -> None:
+    """Record the ingest boundary next to the raw zone; both batch branches clean the same rows with it."""
     import json
 
     warehouse_dir.mkdir(parents=True, exist_ok=True)
@@ -162,6 +174,7 @@ def write_boundary(warehouse_dir: Path, replay_day: date | None, batch_cutoff: d
         "replay_day": replay_day and replay_day.isoformat(),
         "batch_cutoff": batch_cutoff and batch_cutoff.isoformat(),
         "now": now.strftime("%Y-%m-%d %H:%M:%S"),  # reference time of the future_timestamp rule
+        "has_archive": has_archive,
     }))
 
 
@@ -467,56 +480,20 @@ def spark_create_summary(users: DataFrame, movies: DataFrame, watches: DataFrame
 
 
 def serving_frames(tables: dict[str, DataFrame], version: str) -> dict[str, DataFrame]:
-    """Reshape the analytics tables into the Cassandra tables (one per dashboard query).
-
-    Tables whose key holds a changing metric (views, weighted rating) or that are read as one sorted
-    partition get the run's `version` in their partition key (`bucket`): a run writes a new partition
-    next to the one the dashboard is reading, then `publish_version` switches the dashboard over.
-    Tables keyed by a stable id are upserted in place; `user_recommendations` and `view_trends` carry
-    the version as a column so the dashboard can ignore rows a newer run no longer produces.
-    """
-    performance = tables["movie_performance"]
-    bucket = F.lit(version).alias("bucket")
-    rated = performance.where(F.col("weighted_rating").isNotNull())
-    return {
-        "movie_performance": performance.select(bucket, *performance.columns),
-        "movies_by_genre_rating": rated.select(
-            "genre", bucket, "weighted_rating", "movie_id", "title", "avg_rating", "rating_count", "views"
-        ),
-        "top_rated_movies": rated.select(
-            bucket, "weighted_rating", "rating_count", "movie_id", "title", "genre", "avg_rating", "views"
-        ),
-        "top_viewed_movies": performance.select(
-            bucket, "views", "movie_id", "title", "genre", "unique_viewers", "avg_rating",
-            "completion_rate", "watch_hours",
-        ),
-        "low_engagement_movies": tables["low_engagement_movies"].select(
-            bucket, "movie_id", "title", "genre", "views", "watch_minutes", "completion_sum",
-            "completion_rate", "is_low_engagement",
-        ),
-        "genre_popularity": tables["genre_popularity"],
-        "genre_monthly": tables["genre_monthly"],
-        "subscription_views": tables["subscription_views"],
-        "user_engagement": tables["user_engagement"],
-        "hourly_views": tables["hourly_views"],
-        "user_segments": tables["user_segments"],
-        "user_preferences": tables["user_preferences"],
-        "user_recommendations": tables["user_recommendations"].withColumn("bucket", F.lit(version)),
-        "rating_distribution": tables["rating_distribution"],
-        "view_trends": tables["view_trends"].withColumn("bucket", F.lit(version)),
-        "daily_views": tables["daily_views"].select(bucket, "day", "views", "unique_viewers"),
-        "summary_metrics": tables["summary_metrics"].select(
-            bucket, "users", "movies", "views", "ratings", "average_rating"
-        ),
-    }
+    """Reshape the analytics tables into the Cassandra tables (src/serving_spec.py, shared with the
+    Flink branch). Rows carry the run's `version` (`bucket`): a run writes next to the version the
+    dashboard is reading, then `publish_batch_version` switches the dashboard over."""
+    frames = {}
+    for table, spec in SERVING_TABLES.items():
+        frame = tables[spec["source"]]
+        if spec.get("rated"):
+            frame = frame.where(F.col("weighted_rating").isNotNull())
+        frame = frame.withColumn("bucket", F.lit(version))
+        frames[table] = frame.select(*serving_columns(table, [c for c in frame.columns if c != "bucket"]))
+    return frames
 
 
-# Tables with the version in the partition key; the genre ones have one partition per (genre, version).
-VERSIONED_TABLES = ("top_rated_movies", "top_viewed_movies", "low_engagement_movies", "daily_views", "summary_metrics")
-GENRE_VERSIONED_TABLES = ("movie_performance", "movies_by_genre_rating")
-
-
-def write_cassandra(frames: dict[str, DataFrame], keyspace: str = "movie_analytics") -> dict[str, int]:
+def write_cassandra(frames: dict[str, DataFrame], keyspace: str = settings.SPARK_KEYSPACE) -> dict[str, int]:
     """Upsert the serving tables (no truncate: the dashboard keeps reading while a run writes)."""
     counts: dict[str, int] = {}
     for name, frame in frames.items():
@@ -529,25 +506,15 @@ def write_cassandra(frames: dict[str, DataFrame], keyspace: str = "movie_analyti
 
 
 def publish_version(
-    cassandra_host: str, version: str, genres: list[str], replay_day: date | None, batch_cutoff: date | None
+    cassandra_host: str, version: str, genres: list[str], replay_day: date | None, batch_cutoff: date | None,
+    keyspace: str = settings.SPARK_KEYSPACE,
 ) -> None:
-    """Point the dashboard at `version`, then drop the partitions of the version before the previous one
-    (the previous one stays for readers that loaded it a moment ago)."""
-    from src.cassandra_store import connect, publish_serving_state
+    from src.cassandra_store import connect, publish_batch_version
 
     os.environ.setdefault("CASSANDRA_HOST", cassandra_host)
-    session = connect(timeout=30)
+    session = connect(keyspace=keyspace, timeout=30)
     try:
-        stale = publish_serving_state(session, version, replay_day, batch_cutoff)
-        if stale:
-            for table in VERSIONED_TABLES:
-                session.execute(f"DELETE FROM {table} WHERE bucket = %s", [stale])
-            for table in GENRE_VERSIONED_TABLES:
-                for genre in genres:
-                    session.execute(f"DELETE FROM {table} WHERE genre = %s AND bucket = %s", [genre, stale])
-            print(f"Serving version {version} published; removed version {stale}")
-        else:
-            print(f"Serving version {version} published")
+        publish_batch_version(session, version, genres, replay_day, batch_cutoff)
     finally:
         session.cluster.shutdown()
 
@@ -581,6 +548,7 @@ def run(
     quality_report: bool = False,
     replay_day: str = "none",
     archive_dir: Path | None = None,
+    ingest_only: bool = False,
 ) -> None:
     """raw CSV + archived live events -> raw Parquet -> curated Parquet -> analytics tables
     -> Hive / Cassandra / optional CSV."""
@@ -595,15 +563,20 @@ def run(
         print(f"replay_day={live_day} batch_cutoff={cutoff} archived_events={archived is not None}", flush=True)
         run_now = utc_now()
         if warehouse_dir is not None:
-            write_boundary(warehouse_dir, live_day, cutoff, run_now)
-        if warehouse_dir is not None:
+            # Ingest (shared by both batch branches): CSV + Kafka archive -> raw zone with `_seq`, plus the
+            # boundary file. The Flink batch job reads these raw tables and this boundary.
             for database in ("raw", "curated", "analytics"):
                 spark.sql(f"CREATE DATABASE IF NOT EXISTS {database}")
             for name, frame in zip(RAW_SCHEMAS, raw):
                 _save_hive(frame, f"raw.{name}")
             if archived is not None:
                 _save_hive(archived, "raw.watch_events_stream")  # raw-zone copy of the Kafka archive
-            clock = _timed("hive_raw", clock)
+            elif spark.catalog.tableExists("raw.watch_events_stream"):
+                spark.sql("DROP TABLE raw.watch_events_stream")  # no archive now: do not let Flink read an old one
+            write_boundary(warehouse_dir, live_day, cutoff, run_now, archived is not None)
+            clock = _timed("ingest", clock)
+            if ingest_only:
+                return
             # The curated zone is rebuilt from the raw Parquet tables, not from the CSV files.
             raw_tables = [spark.table(f"raw.{name}") for name in RAW_SCHEMAS]
             raw_tables[3] = select_watch_events(
@@ -671,12 +644,18 @@ def main() -> None:
     )
     parser.add_argument(
         "--archive-dir", type=Path, default=settings.ARCHIVE_DIR,
-        help="Parquet archive of the watch-events topic written by src.stream_archiver",
+        help="CSV archive of the watch-events topic written by src.stream_archiver",
+    )
+    parser.add_argument(
+        "--ingest-only", action="store_true",
+        help="only refresh the shared raw zone + boundary (e.g. before a Flink-only batch run)",
     )
     args = parser.parse_args()
+    if args.ingest_only and args.no_hive:
+        parser.error("--ingest-only writes the raw zone and needs the Hive warehouse")
     run(
         args.raw_dir, None if args.no_hive else args.warehouse_dir, args.cassandra_host, args.csv_output_dir,
-        args.quality_report, args.replay_day, args.archive_dir,
+        args.quality_report, args.replay_day, args.archive_dir, args.ingest_only,
     )
 
 

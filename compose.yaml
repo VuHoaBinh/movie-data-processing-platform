@@ -62,7 +62,12 @@ services:
   cassandra-init:
     image: cassandra:5.0
     entrypoint: ["/bin/sh", "-c"]
-    command: ["cqlsh cassandra -f /sql/cassandra_schema.cql"]
+    # Same schema twice: movie_analytics (Spark batch + live tables) and movie_analytics_flink (Flink batch).
+    command:
+      - >-
+        cqlsh cassandra -f /sql/cassandra_schema.cql &&
+        sed -e 's/\bmovie_analytics\b/movie_analytics_flink/g' /sql/cassandra_schema.cql > /tmp/flink_schema.cql &&
+        cqlsh cassandra -f /tmp/flink_schema.cql
     volumes:
       - ./sql:/sql:ro
     depends_on:
@@ -139,9 +144,11 @@ services:
         condition: service_completed_successfully
     restart: on-failure
 
-  # Flink batch layer (alternative engine), on demand: `docker compose --profile flink-batch run --rm flink-batch`.
-  # Recomputes the analytics tables from the same raw files and boundary as the last Spark batch run;
-  # compare with `docker compose run --rm --no-deps benchmark python -m src.compare_batch_engines`.
+  # Flink batch branch (alternative engine), on demand after the shared ingest (part of spark-batch):
+  #   docker compose --profile flink-batch run --rm flink-load
+  # runs flink-batch (raw zone -> flink_curated -> flink_analytics, Parquet) and then loads the result into
+  # Cassandra keyspace movie_analytics_flink. Compare with Spark:
+  #   docker compose run --rm --no-deps benchmark python -m src.compare_batch_engines
   flink-batch:
     profiles: ["flink-batch"]
     build:
@@ -162,6 +169,20 @@ services:
     depends_on:
       flink-jobmanager:
         condition: service_healthy
+
+  flink-load:
+    profiles: ["flink-batch"]
+    image: movie-analytics-app:latest
+    command: ["python", "-m", "src.load_serving"]
+    volumes:
+      - ./data:/app/data
+    environment:
+      CASSANDRA_HOST: cassandra
+    depends_on:
+      flink-batch:
+        condition: service_completed_successfully
+      cassandra-init:
+        condition: service_completed_successfully
 
   # Replays the last day of watch_history in watch_timestamp order (REPLAY_SPEED x real time) and keeps
   # sending heartbeats on the simulated clock. The clock lives in Cassandra, so a restart resumes.
@@ -211,6 +232,8 @@ services:
       dockerfile: Dockerfile
     image: movie-analytics-app:latest
     command: ["python", "-m", "src.spark_speed_layer"]
+    ports:
+      - "4040:4040"  # Spark UI of the speed layer (Structured Streaming tab), always on
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       KAFKA_WATCH_TOPIC: watch-events
@@ -272,6 +295,8 @@ services:
       dockerfile: Dockerfile
     image: movie-analytics-app:latest
     command: ["python", "-m", "src.spark_batch_job"]
+    ports:
+      - "4041:4040"  # Spark UI of the start-up batch run (only while it runs)
     volumes:
       - ./data:/app/data
     environment:
@@ -288,6 +313,7 @@ services:
     image: movie-analytics-app:latest
     ports:
       - "8501:8501"
+      - "4042:4040"  # Spark UI of a batch started with the dashboard's "Refresh batch (Spark)" button
     volumes:
       - ./data:/app/data
     environment:
