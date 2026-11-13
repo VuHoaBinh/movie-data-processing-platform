@@ -7,15 +7,14 @@ low-engagement detection, user segmentation, and time-based trends.
 ## Architecture
 
 Lambda architecture with two parallel branches: **Spark** (main solution) and **Flink** (alternative,
-for comparison). Same sources, same lake layers, same serving tables and the same app; only the engine differs.
+for comparison). Same sources, same rules, same serving tables and the same app; only the engine differs.
 
 ```text
                          4 CSV files + Kafka archive (stream-archiver, CSV in data/warehouse/landing/)
-                                              |
-                                  shared INGEST (Spark): raw.* Parquet, rows numbered `_seq`
-                                  + data/warehouse/batch_boundary.json (replay day, batch cutoff)
+                                  + data/warehouse/batch_boundary.json (replay day, batch cutoff; Spark run)
                                   /                                         \
-     Spark batch: curated.* -> analytics.* (Hive)          Flink SQL BATCH: flink_curated -> flink_analytics (Parquet)
+     Spark batch: raw.* -> curated.* -> analytics.*        Flink SQL BATCH: 14 analytics tables
+                  (Hive / Parquet)                         (CSV in data/warehouse/flink/analytics)
                   | Spark Cassandra connector                               | src/load_serving.py
      Cassandra keyspace movie_analytics                    Cassandra keyspace movie_analytics_flink
                                   \                                         /
@@ -48,8 +47,8 @@ Data management (see [docs/storage_decision.md](docs/storage_decision.md) for th
   (UTC timestamps, de-duplicated; `curated.watch_events` partitioned by `watch_date`) and
   `analytics.*` (the 14 analytics tables).
 
-One `spark-batch` run does the shared ingest (CSV + archive -> `raw.*`), then the Spark branch
-(curated, analytics, Cassandra). The Flink branch then reads the same raw zone. The Pandas pipeline
+One `spark-batch` run does the Spark branch (raw, curated, analytics, Cassandra) and writes
+`batch_boundary.json`. The Flink branch reads the same CSVs and archive with that boundary. The Pandas pipeline
 (`src/batch_processing.py`) is a lightweight reference twin used by the tests.
 
 ## Business requirement coverage
@@ -74,11 +73,12 @@ switches `serving_state` to it, so the dashboard never reads a half-written tabl
 the previous one is deleted.
 
 **Flink batch branch (alternative engine).** `flink/flink_batch_sql_job.py` (Flink SQL, BATCH mode) reads
-the shared raw zone and boundary, applies the same data-quality rules (a duplicated id keeps its first row
-by `_src`, `_seq`, like Spark) and writes `flink_curated` / `flink_analytics` (Parquet) under
-`data/warehouse/flink-warehouse/`. `src/load_serving.py` loads them into the keyspace
-`movie_analytics_flink` with the same tables (`src/serving_spec.py`) and versioning. Run it after a Spark
-batch (which refreshes the raw zone), then compare the two branches:
+the same source CSVs and Kafka archive with the boundary of the last Spark run (`batch_boundary.json`:
+replay day, batch cutoff, data-quality reference time), applies the same data-quality rules and writes
+the 14 analytics tables plus the quality report as headerless CSV under `data/warehouse/flink/analytics/`
+(column names in `_schema.json`). `src/load_serving.py` reads them back with their column types and loads
+them into the keyspace `movie_analytics_flink` with the same tables (`src/serving_spec.py`) and
+versioning. Run it after a Spark batch (which writes the boundary), then compare the two branches:
 
 ```powershell
 docker compose --profile flink-batch run --rm flink-load

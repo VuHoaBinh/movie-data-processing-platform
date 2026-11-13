@@ -148,8 +148,8 @@ services:
 
   # Flink batch branch (alternative engine), on demand after the shared ingest (part of spark-batch):
   #   docker compose --profile flink-batch run --rm flink-load
-  # runs flink-batch (raw zone -> flink_curated -> flink_analytics, Parquet) and then loads the result into
-  # Cassandra keyspace movie_analytics_flink. Compare with Spark:
+  # runs flink-batch (source CSVs + archive -> 14 analytics tables as CSV in data/warehouse/flink/analytics)
+  # and then loads the result into Cassandra keyspace movie_analytics_flink. Compare with Spark:
   #   docker compose run --rm --no-deps benchmark python -m src.compare_batch_engines
   flink-batch:
     profiles: ["flink-batch"]
