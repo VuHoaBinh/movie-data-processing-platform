@@ -1,0 +1,75 @@
+# Run with: docker compose -f compose.yaml -f benchmarks/compose.measure.yaml ...
+services:
+  measure-spark:
+    profiles: [measure]
+    image: movie-analytics-app:latest
+    cpus: 2
+    mem_limit: 4g
+    working_dir: /app
+    entrypoint: []
+    volumes:
+      - ./benchmarks:/app/benchmarks
+      - ./src:/app/src:ro
+    environment:
+      PYSPARK_SUBMIT_ARGS: --master local[2] --driver-memory 2g pyspark-shell
+      SPARK_SHUFFLE_PARTITIONS: '2'
+      JAVA_TOOL_OPTIONS: -XX:ActiveProcessorCount=2
+      PYTHONPATH: /app
+  measure-flink:
+    profiles: [measure]
+    image: movie-data-processing-platformcopy-flink-batch
+    cpus: 2
+    mem_limit: 4g
+    user: root
+    entrypoint: []
+    volumes:
+      - ./benchmarks:/app/benchmarks
+      - ./flink:/app/flink:ro
+    environment:
+      FLINK_BATCH_PARALLELISM: '2'
+      FLINK_STREAM_PARALLELISM: '2'
+      BENCHMARK_ANALYTICS_ONLY: '1'
+      FLINK_ENV_JAVA_OPTS_CLI: -Xms256m -Xmx2g -XX:MaxDirectMemorySize=768m -XX:MaxMetaspaceSize=512m -XX:ReservedCodeCacheSize=128m
+      MALLOC_ARENA_MAX: '2'
+      JAVA_TOOL_OPTIONS: -XX:ActiveProcessorCount=2
+      FLINK_PROPERTIES: |-
+        taskmanager.numberOfTaskSlots: 2
+        parallelism.default: 2
+        taskmanager.memory.process.size: 2048m
+        taskmanager.memory.managed.size: 128m
+        jobmanager.memory.process.size: 768m
+        taskmanager.network.sort-shuffle.min-buffers: 64
+        python.client.executable: /usr/bin/python3
+  measure-materializer:
+    profiles: [measure]
+    image: movie-analytics-app:latest
+    cpus: 0.25
+    mem_limit: 512m
+    working_dir: /app
+    entrypoint: []
+    command: [python, -m, src.speed_materializer]
+    volumes:
+      - ./src:/app/src:ro
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      CASSANDRA_HOST: cassandra
+      CASSANDRA_KEYSPACE: movie_benchmark
+  measure-flink-stream:
+    extends:
+      service: measure-flink
+    cpus: 1.75
+    mem_limit: 3584m
+  measure-client:
+    profiles: [measure]
+    image: movie-analytics-app:latest
+    cpus: 1
+    mem_limit: 1g
+    entrypoint: []
+    volumes:
+      - ./benchmarks:/app/benchmarks
+      - ./src:/app/src:ro
+      - ./sql:/app/sql:ro
+    environment:
+      CASSANDRA_HOST: cassandra
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      PYTHONPATH: /app

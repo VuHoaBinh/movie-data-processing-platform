@@ -109,6 +109,8 @@ services:
       FLINK_PROPERTIES: |-
         jobmanager.rpc.address: flink-jobmanager
         taskmanager.numberOfTaskSlots: 4
+        # Keep sort-shuffle buffers small enough for the single-node batch demo.
+        taskmanager.network.sort-shuffle.min-buffers: 128
         python.client.executable: /usr/bin/python3
     depends_on:
       flink-jobmanager:
@@ -154,12 +156,16 @@ services:
     build:
       context: .
       dockerfile: flink/Dockerfile
+    # Spark creates the shared warehouse as root. Prepare only the Flink output directory
+    # before the stock entrypoint applies configuration and drops privileges to flink.
+    entrypoint: ["/bin/bash", "-lc"]
     command:
-      - bash
-      - -lc
       - >-
-        until curl -fsS http://flink-jobmanager:8081/overview >/dev/null; do sleep 2; done;
-        flink run -m flink-jobmanager:8081 -py /opt/flink/usrlib/flink_batch_sql_job.py --data-dir /opt/flink/data
+        mkdir -p /opt/flink/data/warehouse/flink &&
+        chown flink:flink /opt/flink/data/warehouse/flink &&
+        exec /docker-entrypoint.sh bash -lc
+        'until curl -fsS http://flink-jobmanager:8081/overview >/dev/null; do sleep 2; done;
+        flink run -m flink-jobmanager:8081 -py /opt/flink/usrlib/flink_batch_sql_job.py --data-dir /opt/flink/data'
     volumes:
       - ./data:/opt/flink/data
     environment:

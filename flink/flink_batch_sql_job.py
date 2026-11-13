@@ -99,7 +99,6 @@ def parse_ts(column: str) -> str:
         f"(CAST(SUBSTRING({column} FROM 21 FOR 2) AS INT) * 60 + CAST(SUBSTRING({column} FROM 24 FOR 2) AS INT))"
     )
     return f"""(CASE
-        WHEN {column} IS NULL THEN CAST(NULL AS TIMESTAMP(3))
         WHEN CHAR_LENGTH({column}) = 19 THEN {base}
         WHEN CHAR_LENGTH({column}) = 20 AND SUBSTRING({column} FROM 20 FOR 1) = 'Z' THEN {base}
         WHEN CHAR_LENGTH({column}) = 25 AND SUBSTRING({column} FROM 20 FOR 1) = '+'
@@ -107,7 +106,7 @@ def parse_ts(column: str) -> str:
         WHEN CHAR_LENGTH({column}) = 25 AND SUBSTRING({column} FROM 20 FOR 1) = '-'
             THEN TIMESTAMPADD(MINUTE, {offset_minutes}, {base})
         WHEN CHAR_LENGTH({column}) = 10 THEN TO_TIMESTAMP({column}, 'yyyy-MM-dd')
-        ELSE CAST(NULL AS TIMESTAMP(3)) END)"""
+        ELSE TRY_CAST({column} AS TIMESTAMP(3)) END)"""
 
 
 def lit(text: str) -> str:
@@ -291,13 +290,16 @@ class Job:
                        AS weighted_rating
             FROM rating_counts, rating_priors""")
         v("watch_stats", """
-            SELECT movie_id, COUNT(watch_id) AS views, SUM(CAST(watch_duration AS BIGINT)) AS watch_minutes,
-                   SUM(completion) AS completion_sum, AVG(completion) AS avg_completion,
+            SELECT movie_id, COUNT(watch_id) AS `views`, SUM(CAST(watch_duration AS BIGINT)) AS watch_minutes,
+                   CAST(SUM(CAST(LEAST(watch_duration, duration) AS BIGINT)) AS DOUBLE) / MAX(duration)
+                       AS completion_sum,
+                   CAST(SUM(CAST(LEAST(watch_duration, duration) AS BIGINT)) AS DOUBLE)
+                       / (CAST(MAX(duration) AS BIGINT) * COUNT(watch_id)) AS avg_completion,
                    COUNT(DISTINCT user_id) AS unique_viewers
             FROM joined GROUP BY movie_id""")
         v("movie_stats", f"""
             SELECT m.movie_id, m.title, m.genre, m.release_year, m.duration, m.content_type, m.{q('language')},
-                   m.maturity_rating, COALESCE(w.views, 0) AS views, COALESCE(w.unique_viewers, 0) AS unique_viewers,
+                   m.maturity_rating, COALESCE(w.`views`, 0) AS `views`, COALESCE(w.unique_viewers, 0) AS unique_viewers,
                    r.avg_rating, r.rating_count, r.weighted_rating,
                    ROUND(CAST(COALESCE(w.watch_minutes, 0) AS DOUBLE) / 60, 1) AS watch_hours,
                    ROUND(w.avg_completion, 3) AS completion_rate, COALESCE(w.watch_minutes, 0) AS watch_minutes,
@@ -306,20 +308,20 @@ class Job:
             LEFT JOIN rating_stats r ON m.movie_id = r.movie_id""")
         v("movie_performance", f"""
             SELECT movie_id, title, genre, release_year, duration, content_type, {q('language')}, maturity_rating,
-                   views, unique_viewers, avg_rating, rating_count, weighted_rating, watch_hours, completion_rate
+                   `views`, unique_viewers, avg_rating, rating_count, weighted_rating, watch_hours, completion_rate
             FROM movie_stats""")
         v("user_stats", """
-            SELECT user_id, COUNT(watch_id) AS views, SUM(CAST(watch_duration AS BIGINT)) AS watch_minutes,
+            SELECT user_id, COUNT(watch_id) AS `views`, SUM(CAST(watch_duration AS BIGINT)) AS watch_minutes,
                    COUNT(DISTINCT CAST(watch_timestamp AS DATE)) AS active_days,
                    SUM(completion) AS completion_sum, AVG(completion) AS avg_completion
             FROM joined GROUP BY user_id""")
         v("user_engagement", f"""
-            SELECT u.user_id, u.subscription_plan, u.region, COALESCE(s.views, 0) AS views,
+            SELECT u.user_id, u.subscription_plan, u.region, COALESCE(s.`views`, 0) AS `views`,
                    COALESCE(s.watch_minutes, 0) AS watch_minutes, COALESCE(s.active_days, 0) AS active_days,
                    ROUND(COALESCE(s.completion_sum, CAST(0.0 AS DOUBLE)), 4) AS completion_sum,
                    ROUND(s.avg_completion, 3) AS avg_completion,
-                   CASE WHEN COALESCE(s.views, 0) <= 10 THEN {lit('Inactive')}
-                        WHEN COALESCE(s.views, 0) <= 35 THEN {lit('Casual')} ELSE {lit('Active')} END AS segment
+                   CASE WHEN COALESCE(s.`views`, 0) <= 10 THEN {lit('Inactive')}
+                        WHEN COALESCE(s.`views`, 0) <= 35 THEN {lit('Casual')} ELSE {lit('Active')} END AS segment
             FROM users_clean u LEFT JOIN user_stats s ON u.user_id = s.user_id""")
         v("genre_ranked", """
             SELECT user_id, genre, ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY genre_views DESC, genre) AS rn
@@ -341,13 +343,13 @@ class Job:
             LEFT JOIN watched w ON f.user_id = w.user_id AND r.movie_id = w.movie_id
             WHERE w.movie_id IS NULL""")
         v("genre_views", """
-            SELECT genre, COUNT(watch_id) AS views, COUNT(DISTINCT user_id) AS unique_viewers,
+            SELECT genre, COUNT(watch_id) AS `views`, COUNT(DISTINCT user_id) AS unique_viewers,
                    ROUND(CAST(SUM(CAST(watch_duration AS BIGINT)) AS DOUBLE) / 60, 1) AS watch_hours
             FROM joined GROUP BY genre""")
         v("rated_genre", "SELECT r.rating, r.ts, m.genre FROM ratings_clean r JOIN movies_clean m ON r.movie_id = m.movie_id")
         month = "TO_DATE(DATE_FORMAT({}, 'yyyy-MM-01'))"
         v("genre_month_views", f"""
-            SELECT genre, {month.format('watch_timestamp')} AS {q('month')}, COUNT(watch_id) AS views,
+            SELECT genre, {month.format('watch_timestamp')} AS {q('month')}, COUNT(watch_id) AS `views`,
                    COUNT(DISTINCT user_id) AS unique_viewers,
                    ROUND(CAST(SUM(CAST(watch_duration AS BIGINT)) AS DOUBLE) / 60, 1) AS watch_hours
             FROM joined GROUP BY genre, {month.format('watch_timestamp')}""")
@@ -358,12 +360,12 @@ class Job:
         queries = {
             "movie_performance": "SELECT * FROM movie_performance",
             "low_engagement_movies": f"""
-                SELECT movie_id, title, genre, views, watch_minutes,
+                SELECT movie_id, title, genre, `views`, watch_minutes,
                        ROUND(COALESCE(completion_sum, CAST(0.0 AS DOUBLE)), 4), completion_rate,
-                       views >= {MIN_VIEWS} AND COALESCE(avg_completion < {LOW_COMPLETION_THRESHOLD}, FALSE)
+                       `views` >= {MIN_VIEWS} AND COALESCE(avg_completion < {LOW_COMPLETION_THRESHOLD}, FALSE)
                 FROM movie_stats""",
             "genre_popularity": """
-                SELECT v.genre, v.views, v.unique_viewers, v.watch_hours, r.avg_rating FROM genre_views v
+                SELECT v.genre, v.`views`, v.unique_viewers, v.watch_hours, r.avg_rating FROM genre_views v
                 LEFT JOIN (SELECT genre, ROUND(AVG(CAST(rating AS DOUBLE)), 2) AS avg_rating FROM rated_genre
                            GROUP BY genre) r ON v.genre = r.genre""",
             "subscription_views": """
@@ -371,9 +373,9 @@ class Job:
                 GROUP BY subscription_plan""",
             "user_engagement": "SELECT * FROM user_engagement",
             "user_segments": f"""
-                SELECT s.segment, COALESCE(e.users, 0), COALESCE(e.views, 0)
+                SELECT s.segment, COALESCE(e.users, 0), COALESCE(e.`views`, 0)
                 FROM (VALUES ({lit('Inactive')}), ({lit('Casual')}), ({lit('Active')})) AS s(segment)
-                LEFT JOIN (SELECT segment, COUNT(user_id) AS users, SUM(views) AS views FROM user_engagement
+                LEFT JOIN (SELECT segment, COUNT(user_id) AS users, SUM(`views`) AS `views` FROM user_engagement
                            GROUP BY segment) e ON s.segment = e.segment""",
             "user_preferences": """
                 SELECT user_id, MAX(CASE WHEN rn = 1 THEN genre END)
@@ -406,7 +408,7 @@ class Job:
                     FROM ratings_clean GROUP BY movie_id) d ON p.movie_id = d.movie_id
                 WHERE p.rating_count IS NOT NULL""",
             "genre_monthly": f"""
-                SELECT v.genre, v.{q('month')}, v.views, v.unique_viewers, v.watch_hours, r.avg_rating
+                SELECT v.genre, v.{q('month')}, v.`views`, v.unique_viewers, v.watch_hours, r.avg_rating
                 FROM genre_month_views v LEFT JOIN genre_month_ratings r
                     ON v.genre = r.genre AND v.{q('month')} = r.{q('month')}""",
             "view_trends": self.view_trends(),
@@ -438,13 +440,13 @@ class Job:
             for period in periods:
                 name = f"trend_{scope}_{period}"
                 self.view(name, f"""
-                    SELECT {keys[scope]} AS k, {starts[period]} AS period_start, COUNT(watch_id) AS views
+                    SELECT {keys[scope]} AS k, {starts[period]} AS period_start, COUNT(watch_id) AS `views`
                     FROM joined GROUP BY {keys[scope]}, {starts[period]}""")
                 parts.append(f"""
-                    SELECT {lit(scope)}, c.k, {lit(period)}, c.period_start, c.views, COALESCE(p.views, 0),
-                           CASE WHEN p.views > 0
-                                THEN ROUND(CAST(c.views - p.views AS DOUBLE) / p.views, 3) END
-                    FROM (SELECT k, period_start, views, {previous[period]} AS prev_start FROM {name}) c
+                    SELECT {lit(scope)}, c.k, {lit(period)}, c.period_start, c.`views`, COALESCE(p.`views`, 0),
+                           CASE WHEN p.`views` > 0
+                                THEN ROUND(CAST(c.`views` - p.`views` AS DOUBLE) / p.`views`, 3) END
+                    FROM (SELECT k, period_start, `views`, {previous[period]} AS prev_start FROM {name}) c
                     LEFT JOIN {name} p ON c.k = p.k AND c.prev_start = p.period_start""")
         return " UNION ALL ".join(parts)
 
@@ -456,19 +458,22 @@ class Job:
         queries = self.analytics()
         shutil.rmtree(self.output_dir, ignore_errors=True)
         self.output_dir.mkdir(parents=True)
-        statements = self.env.create_statement_set()
         for table, columns in TABLES.items():
+            if table == "quality_report" and os.getenv("BENCHMARK_ANALYTICS_ONLY") == "1":
+                continue
             fields = ", ".join(f"{q(name)} {kind}" for name, kind in columns)
             self.sql(f"""
                 CREATE TEMPORARY TABLE sink_{table} ({fields}) WITH (
                     'connector' = 'filesystem', 'path' = 'file://{(self.output_dir / table).resolve()}',
                     'format' = 'csv'
                 )""")
-            statements.add_insert_sql(f"INSERT INTO sink_{table} {queries[table]}")
+            # Each query can contain many joins and shuffles. Submitting all sinks as one
+            # job exhausts the network buffers of the single-TaskManager demo cluster.
+            self.env.execute_sql(f"INSERT INTO sink_{table} {queries[table]}").wait()
+            print(f"Flink batch table {table} written", flush=True)
         (self.output_dir / "_schema.json").write_text(json.dumps(
             {table: [name for name, _ in columns] for table, columns in TABLES.items()}, indent=1
         ))
-        statements.execute().wait()
         print(f"TIMING flink_batch_total {time.perf_counter() - started:.1f}", flush=True)
         print(f"Flink batch tables written to {self.output_dir} "
               f"(replay_day={self.replay_day}, batch_cutoff={self.batch_cutoff}, now={self.now})", flush=True)

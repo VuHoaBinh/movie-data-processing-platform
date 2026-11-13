@@ -130,6 +130,7 @@ def build_tables(
     joined = joined.merge(users, on="user_id", validate="many_to_one")
     # Completion of one view, capped at 1 (watch_duration and duration are both minutes).
     joined["completion"] = (joined["watch_duration"] / joined["duration"]).clip(upper=1.0)
+    joined["capped_minutes"] = joined[["watch_duration", "duration"]].min(axis=1)
 
     rating_stats = (
         ratings.groupby("movie_id", as_index=False)
@@ -149,11 +150,17 @@ def build_tables(
         .agg(
             views=("watch_id", "count"),
             watch_minutes=("watch_duration", "sum"),
-            completion_sum=("completion", "sum"),
-            avg_completion=("completion", "mean"),
+            capped_minutes=("capped_minutes", "sum"),
+            movie_duration=("duration", "first"),
             unique_viewers=("user_id", "nunique"),
         )
     )
+    # Match both engines: per movie, divide the exact integer total only once.
+    watch_stats["completion_sum"] = watch_stats["capped_minutes"] / watch_stats["movie_duration"]
+    watch_stats["avg_completion"] = watch_stats["capped_minutes"] / (
+        watch_stats["movie_duration"] * watch_stats["views"]
+    )
+    watch_stats = watch_stats.drop(columns=["capped_minutes", "movie_duration"])
     movie_performance = (
         movies[["movie_id", "title", "genre", "release_year", "duration", "content_type", "language",
                 "maturity_rating"]]

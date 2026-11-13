@@ -147,7 +147,7 @@ def run(
         .config("spark.jars.packages", f"{KAFKA_PACKAGE},{CASSANDRA_PACKAGE}")
         .config("spark.cassandra.connection.host", cassandra_host)
         .config("spark.sql.session.timeZone", "UTC")
-        .config("spark.sql.shuffle.partitions", "4")
+        .config("spark.sql.shuffle.partitions", os.getenv("SPARK_SHUFFLE_PARTITIONS", "4"))
         .getOrCreate()
     )
     spark.sparkContext.setLogLevel("WARN")

@@ -38,7 +38,7 @@ def main() -> None:
 
     table_env = TableEnvironment.create(EnvironmentSettings.in_streaming_mode())
     config = table_env.get_config()
-    config.set("parallelism.default", "1")
+    config.set("parallelism.default", os.getenv("FLINK_STREAM_PARALLELISM", "1"))
     config.set("table.local-time-zone", "UTC")
     config.set("execution.checkpointing.interval", "10 s")
     # Per-day running totals: a day's keys get no update after the day ends (late events aside),

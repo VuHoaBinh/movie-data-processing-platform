@@ -55,7 +55,7 @@ def create_spark(
     builder = (
         SparkSession.builder.appName(app_name)
         .config("spark.sql.session.timeZone", "UTC")
-        .config("spark.sql.shuffle.partitions", "16")  # the default 200 is far too many for this data size
+        .config("spark.sql.shuffle.partitions", os.getenv("SPARK_SHUFFLE_PARTITIONS", "16"))
     )
     if warehouse_dir is not None:
         warehouse_dir = warehouse_dir.resolve()
@@ -241,9 +241,17 @@ def build_tables(
     watch_stats = joined.groupBy("movie_id").agg(
         F.count("watch_id").alias("views"),
         F.sum("watch_duration").alias("watch_minutes_raw"),
-        F.sum("completion").alias("completion_sum"),
-        F.avg("completion").alias("avg_completion"),
+        F.sum(F.least("watch_duration", "duration")).alias("capped_minutes"),
+        F.first("duration").alias("movie_duration"),
         F.countDistinct("user_id").alias("unique_viewers"),
+    )
+    # A movie has one duration: sum capped integer minutes before dividing. Summing
+    # per-view floating ratios can move exact rounding ties to either side.
+    watch_stats = (
+        watch_stats.withColumn("completion_sum", F.col("capped_minutes").cast("double") / F.col("movie_duration"))
+        .withColumn("avg_completion", F.col("capped_minutes").cast("double") /
+                    (F.col("movie_duration").cast("long") * F.col("views")))
+        .drop("capped_minutes", "movie_duration")
     )
     movie_stats = (
         movies.select(

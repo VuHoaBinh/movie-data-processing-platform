@@ -126,6 +126,27 @@ def test_completion_is_capped_per_view(capped_tables):
     assert (user["views"], user["completion_sum"], user["avg_completion"]) == (1, 1.0, 1.0)
 
 
+@pytest.mark.parametrize("engine", ["pandas", pytest.param("spark", marks=pytest.mark.spark)])
+def test_movie_completion_rounding_is_stable_at_halfway_values(engine, fixture_dir, tmp_path, request):
+    """94/160 is exactly a rounding tie at three decimal places, even after many views."""
+    import shutil
+
+    for path in fixture_dir.iterdir():
+        shutil.copy(path, tmp_path / path.name)
+    movies = tmp_path / "movies.csv"
+    movies.write_text(movies.read_text().replace("M1,Alpha,Action,2020,100,", "M1,Alpha,Action,2020,160,"))
+    watches = "watch_id,user_id,movie_id,watch_timestamp,watch_duration,device\n"
+    watches += "".join(f"WT{i},U1,M1,2026-01-04 10:00:00,94,Web\n" for i in range(40))
+    (tmp_path / "watch_history.csv").write_text(watches)
+    tables = pandas_tables(tmp_path)[0] if engine == "pandas" else spark_tables(
+        request.getfixturevalue("spark"), tmp_path
+    )[0]
+    for name in ("movie_performance", "low_engagement_movies"):
+        row = tables[name].set_index("movie_id").loc["M1"]
+        assert row["completion_rate"] == 0.588
+    assert tables["low_engagement_movies"].set_index("movie_id").loc["M1", "completion_sum"] == 23.5
+
+
 @pytest.fixture(scope="module", params=["pandas", pytest.param("spark", marks=pytest.mark.spark)])
 def recommendation_tables(request, fixture_dir, tmp_path_factory):
     """The fixture plus an unwatched Action movie M5 and ratings for M4 and M5.
